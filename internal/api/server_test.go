@@ -45,6 +45,9 @@ func TestStatusAndCADownload(t *testing.T) {
 	if got := resp.Header.Get("Content-Type"); got != "application/x-pem-file" {
 		t.Fatalf("Content-Type = %q", got)
 	}
+	if got := resp.Header.Get("Content-Disposition"); got != "attachment; filename=intercept-ca.pem" {
+		t.Fatalf("Content-Disposition = %q", got)
+	}
 	_ = resp.Body.Close()
 }
 

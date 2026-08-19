@@ -12,6 +12,8 @@ export const getStatus = () => api<StatusDTO>('/api/status');
 
 export const getHistory = () => api<HistoryItem[]>('/api/history');
 
+export const caDownloadURL = '/api/ca.pem';
+
 export const getExchange = (id: number) => api<Exchange>(`/api/history/${id}`);
 
 export const sendRepeater = (id: string, request: SendRequest) =>

@@ -3,6 +3,33 @@ import '@testing-library/jest-dom/vitest';
 import { App } from './App';
 import { Inspector } from './components/Inspector';
 
+beforeEach(() => {
+  vi.stubGlobal('fetch', vi.fn(() => new Promise<Response>(() => undefined)));
+});
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
+
+test('loads status from api', async () => {
+  vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+    if (url.endsWith('/api/status')) {
+      return new Response(JSON.stringify({
+        apiAddr: '127.0.0.1:9080',
+        proxyAddr: '127.0.0.1:18080',
+        caFingerprint: 'AA:BB',
+        httpsInterception: true,
+      }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    }
+    if (url.endsWith('/api/history')) {
+      return new Response(JSON.stringify([]), { status: 200 });
+    }
+    return new Response('{}', { status: 404 });
+  }));
+  render(<App />);
+  expect(await screen.findByText('127.0.0.1:18080')).toBeInTheDocument();
+});
+
 test('renders operator shell status', () => {
   render(<App />);
   expect(screen.getByText('Proxy')).toBeInTheDocument();

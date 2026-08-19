@@ -26,6 +26,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, _ *http.Request) {
 
 func (s *Server) handleCADownload(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/x-pem-file")
+	w.Header().Set("Content-Disposition", "attachment; filename=intercept-ca.pem")
 	_, _ = w.Write(s.cfg.Authority.CACertPEM())
 }
 
