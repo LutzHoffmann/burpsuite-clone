@@ -68,10 +68,10 @@ export function App() {
             <div><dt>Duration</dt><dd>{exchange ? `${exchange.Duration} ms` : '-'}</dd></div>
             <div><dt>Response</dt><dd>{exchange ? `${(exchange.ResponseSize / 1024).toFixed(1)} kB` : '-'}</dd></div>
           </dl>
-          <InterceptPanel items={interceptItems} onForward={forwardIntercept} onDrop={dropIntercept} />
         </aside>
 
         <section className="repeater-workspace">
+          <InterceptPanel items={interceptItems} onForward={forwardIntercept} onDrop={dropIntercept} />
           <Repeater initialRequest={repeaterRequest} result={repeaterResult} onSend={sendRepeater} />
         </section>
       </div>

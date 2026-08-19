@@ -39,3 +39,9 @@ test('shows intercept and repeater controls', () => {
   expect(screen.getByText('Request Editor')).toBeInTheDocument();
   expect(screen.getByRole('button', { name: 'Send' })).toBeInTheDocument();
 });
+
+test('keeps the intercept queue outside the hidden utilities panel', () => {
+  render(<App />);
+
+  expect(screen.getByLabelText('Intercept Queue').closest('.utility-panel')).toBeNull();
+});
