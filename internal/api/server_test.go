@@ -87,10 +87,39 @@ func TestStatusWithoutAuthorityDisablesHTTPSInterception(t *testing.T) {
 	}
 }
 
+func TestRootServesOperatorFallback(t *testing.T) {
+	srv := NewServer(Config{})
+	server := httptest.NewServer(srv.Handler())
+	defer server.Close()
+
+	response, err := http.Get(server.URL + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", response.StatusCode)
+	}
+	body, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(body, []byte("BurpSuite Clone")) {
+		t.Fatalf("fallback body = %q", body)
+	}
+}
+
 func TestRepeaterSend(t *testing.T) {
 	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			t.Fatalf("method = %s", r.Method)
+		}
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(body) != "request payload" {
+			t.Fatalf("request body = %q", body)
 		}
 		w.Header().Set("Content-Type", "text/plain")
 		_, _ = w.Write([]byte("sent"))
@@ -112,7 +141,12 @@ func TestRepeaterSend(t *testing.T) {
 	server := httptest.NewServer(srv.Handler())
 	defer server.Close()
 
-	body, err := json.Marshal(repeater.SendRequest{Method: http.MethodPost, URL: target.URL})
+	body, err := json.Marshal(map[string]interface{}{
+		"method":  http.MethodPost,
+		"url":     target.URL,
+		"body":    "request payload",
+		"headers": map[string][]string{},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -129,11 +163,13 @@ func TestRepeaterSend(t *testing.T) {
 		t.Fatalf("status = %d, body = %q", response.StatusCode, responseBody)
 	}
 
-	var result repeater.SendResult
+	var result struct {
+		Body string `json:"body"`
+	}
 	if err := json.NewDecoder(response.Body).Decode(&result); err != nil {
 		t.Fatal(err)
 	}
-	if string(result.Body) != "sent" {
+	if result.Body != "sent" {
 		t.Fatalf("body = %q", result.Body)
 	}
 

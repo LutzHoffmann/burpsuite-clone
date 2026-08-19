@@ -15,6 +15,23 @@ import (
 
 var websocketUpgrader = websocket.Upgrader{}
 
+type repeaterAPIRequest struct {
+	Method  string              `json:"method"`
+	URL     string              `json:"url"`
+	Headers map[string][]string `json:"headers"`
+	Body    string              `json:"body"`
+}
+
+type repeaterAPIResponse struct {
+	Status      int                 `json:"status"`
+	Headers     map[string][]string `json:"headers"`
+	Body        string              `json:"body"`
+	DurationMS  int64               `json:"durationMs"`
+	Size        int64               `json:"size"`
+	Truncated   bool                `json:"truncated"`
+	ContentType string              `json:"contentType"`
+}
+
 func (s *Server) handleStatus(w http.ResponseWriter, _ *http.Request) {
 	caFingerprint := ""
 	caTrust := "unavailable"
@@ -101,12 +118,17 @@ func (s *Server) handleRepeaterSend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var request repeater.SendRequest
+	var request repeaterAPIRequest
 	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
 		http.Error(w, "invalid repeater request", http.StatusBadRequest)
 		return
 	}
-	result, err := s.cfg.Repeater.Send(r.Context(), request)
+	result, err := s.cfg.Repeater.Send(r.Context(), repeater.SendRequest{
+		Method:  request.Method,
+		URL:     request.URL,
+		Headers: request.Headers,
+		Body:    []byte(request.Body),
+	})
 	if err != nil {
 		http.Error(w, "send repeater request", http.StatusBadGateway)
 		return
@@ -121,7 +143,15 @@ func (s *Server) handleRepeaterSend(w http.ResponseWriter, r *http.Request) {
 			},
 		})
 	}
-	writeJSON(w, http.StatusOK, result)
+	writeJSON(w, http.StatusOK, repeaterAPIResponse{
+		Status:      result.Status,
+		Headers:     result.Headers,
+		Body:        string(result.Body),
+		DurationMS:  result.DurationMS,
+		Size:        result.Size,
+		Truncated:   result.Truncated,
+		ContentType: result.ContentType,
+	})
 }
 
 func writeJSON(w http.ResponseWriter, status int, value interface{}) {
