@@ -10,9 +10,17 @@ v1 focuses on HTTP/HTTPS proxying, interception, history, inspection, Repeater, 
 
 Use this tool only against systems you own or are authorized to test. Captured traffic and generated certificates stay local by default.
 
-## Development
+## Run
+
+```bash
+go run ./cmd/proxy
+```
+
+Open `http://127.0.0.1:9080`, configure your browser proxy to `127.0.0.1:8080`, download the CA from Settings, and trust it for HTTPS interception.
+
+## Test
 
 ```bash
 go test ./...
-go run ./cmd/proxy
+cd web && npm test && npm run build
 ```
