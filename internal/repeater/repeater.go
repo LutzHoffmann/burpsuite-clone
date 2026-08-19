@@ -93,7 +93,7 @@ func readLimitedBody(body io.Reader, limit int64) ([]byte, int64, bool, error) {
 			break
 		}
 		if err != nil {
-			return nil, 0, false, err
+			return captured.Bytes(), size, size > limit, err
 		}
 	}
 	return captured.Bytes(), size, size > limit, nil

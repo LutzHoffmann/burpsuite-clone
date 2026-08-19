@@ -12,6 +12,7 @@ import (
 	"github.com/lutzifer/burpsuite-clone/internal/config"
 	"github.com/lutzifer/burpsuite-clone/internal/events"
 	"github.com/lutzifer/burpsuite-clone/internal/proxy"
+	"github.com/lutzifer/burpsuite-clone/internal/repeater"
 	"github.com/lutzifer/burpsuite-clone/internal/store"
 )
 
@@ -54,6 +55,7 @@ func main() {
 		Store:     history,
 		Authority: authority,
 		Events:    hub,
+		Repeater:  repeater.NewService(http.DefaultTransport, cfg.BodyLimitBytes),
 		APIAddr:   cfg.APIAddr,
 		ProxyAddr: cfg.ProxyAddr,
 	})
