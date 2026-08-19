@@ -3,6 +3,8 @@ package proxy
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"io"
 	"net"
 	"net/http"
@@ -11,6 +13,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/lutzifer/burpsuite-clone/internal/certs"
 	"github.com/lutzifer/burpsuite-clone/internal/store"
 )
 
@@ -104,6 +107,63 @@ func TestHTTPProxyTruncatesCapturedBodies(t *testing.T) {
 	}
 	if !bytes.Equal(exchange.Response.Body, []byte(responseBody[:bodyLimit])) {
 		t.Fatalf("captured response body = %q", exchange.Response.Body)
+	}
+}
+
+func TestHTTPSProxyMITMCapturesExchange(t *testing.T) {
+	target := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer target.Close()
+
+	authority, err := certs.LoadOrCreateAuthority(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	mem := &memoryStore{}
+	upstreamTransport := target.Client().Transport.(*http.Transport).Clone()
+	upstreamTLS := upstreamTransport.TLSClientConfig.Clone()
+	upstreamTLS.ServerName = "example.com"
+	upstreamTransport.TLSClientConfig = upstreamTLS
+	srv := NewServer(Config{
+		Store:          mem,
+		BodyLimitBytes: 2048,
+		Transport:      upstreamTransport,
+		Authority:      authority,
+	})
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() { _ = srv.Serve(ln) }()
+
+	roots := x509.NewCertPool()
+	if !roots.AppendCertsFromPEM(authority.CACertPEM()) {
+		t.Fatal("failed to trust test CA")
+	}
+	client := &http.Client{Transport: &http.Transport{
+		Proxy: http.ProxyURL(mustParseURL(t, "http://"+ln.Addr().String())),
+		TLSClientConfig: &tls.Config{
+			RootCAs: roots,
+		},
+	}}
+	resp, err := client.Get(strings.Replace(target.URL, "127.0.0.1", "localhost", 1) + "/secure")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+
+	if string(body) != `{"ok":true}` {
+		t.Fatalf("body = %q", body)
+	}
+	if len(mem.saved) != 1 {
+		t.Fatalf("saved exchanges = %d", len(mem.saved))
+	}
+	if mem.saved[0].Scheme != "https" || mem.saved[0].Path != "/secure" {
+		t.Fatalf("exchange = %+v", mem.saved[0])
 	}
 }
 
