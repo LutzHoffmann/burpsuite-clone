@@ -54,9 +54,10 @@ func TestCertificateForHostContainsDNSName(t *testing.T) {
 	}
 }
 
-func TestLoadOrCreateAuthorityRejectsMismatchedKey(t *testing.T) {
+func TestLoadOrCreateAuthorityRecoversMismatchedPair(t *testing.T) {
 	dir := t.TempDir()
-	if _, err := LoadOrCreateAuthority(dir); err != nil {
+	original, err := LoadOrCreateAuthority(dir)
+	if err != nil {
 		t.Fatal(err)
 	}
 	otherKey, err := rsa.GenerateKey(rand.Reader, keyBits)
@@ -70,8 +71,34 @@ func TestLoadOrCreateAuthorityRejectsMismatchedKey(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, caKeyFile), keyPEM, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := LoadOrCreateAuthority(dir); err == nil {
-		t.Fatal("expected mismatched CA key to be rejected")
+	recovered, err := LoadOrCreateAuthority(dir)
+	if err != nil {
+		t.Fatalf("recover mismatched CA pair: %v", err)
+	}
+	if recovered.FingerprintSHA256() == original.FingerprintSHA256() {
+		t.Fatal("recovered authority reused the corrupted certificate")
+	}
+	leaf, err := recovered.CertificateForHost("app.example.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	leafCert, err := x509.ParseCertificate(leaf.Certificate[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	caBlock, _ := pem.Decode(recovered.CACertPEM())
+	caCert, err := x509.ParseCertificate(caBlock.Bytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	roots := x509.NewCertPool()
+	roots.AddCert(caCert)
+	if _, err := leafCert.Verify(x509.VerifyOptions{
+		Roots:     roots,
+		DNSName:   "app.example.test",
+		KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+	}); err != nil {
+		t.Fatalf("verify recovered leaf certificate: %v", err)
 	}
 }
 

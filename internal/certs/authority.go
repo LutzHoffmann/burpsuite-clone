@@ -27,6 +27,8 @@ const (
 	keyBits    = 2048
 )
 
+var errAuthorityKeyMismatch = errors.New("certificate authority certificate and key do not match")
+
 // Authority owns the local CA key and the certificates it issues for hosts.
 type Authority struct {
 	certPEM []byte
@@ -56,7 +58,16 @@ func LoadOrCreateAuthority(dir string) (*Authority, error) {
 	certPEM, certErr := os.ReadFile(certPath)
 	keyPEM, keyErr := os.ReadFile(keyPath)
 	if certErr == nil && keyErr == nil {
-		return loadAuthority(certPEM, keyPEM, keyPath)
+		authority, err := loadAuthority(certPEM, keyPEM, keyPath)
+		if err == nil {
+			return authority, nil
+		}
+		if !errors.Is(err, errAuthorityKeyMismatch) {
+			return nil, err
+		}
+		if err := removeAuthorityPair(certPath, keyPath); err != nil {
+			return nil, err
+		}
 	}
 	if certErr != nil && !errors.Is(certErr, os.ErrNotExist) {
 		return nil, fmt.Errorf("read certificate authority certificate: %w", certErr)
@@ -85,6 +96,15 @@ func LoadOrCreateAuthority(dir string) (*Authority, error) {
 		return nil, err
 	}
 	return authority, nil
+}
+
+func removeAuthorityPair(certPath, keyPath string) error {
+	for _, path := range []string{certPath, keyPath} {
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("remove corrupt certificate authority file %q: %w", path, err)
+		}
+	}
+	return nil
 }
 
 func acquireDirectoryLock(dir string) (func(), error) {
@@ -206,7 +226,7 @@ func loadAuthority(certPEM, keyPEM []byte, keyPath string) (*Authority, error) {
 	}
 	publicKey, ok := cert.PublicKey.(*rsa.PublicKey)
 	if !ok || publicKey.N.Cmp(key.N) != 0 || publicKey.E != key.E {
-		return nil, errors.New("certificate authority certificate and key do not match")
+		return nil, errAuthorityKeyMismatch
 	}
 	if err := os.Chmod(keyPath, 0o600); err != nil {
 		return nil, fmt.Errorf("restrict certificate authority key permissions: %w", err)
