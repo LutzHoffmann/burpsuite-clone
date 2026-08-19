@@ -8,6 +8,8 @@ import (
 	"strconv"
 
 	"github.com/gorilla/websocket"
+	"github.com/lutzifer/burpsuite-clone/internal/events"
+	"github.com/lutzifer/burpsuite-clone/internal/repeater"
 	"github.com/lutzifer/burpsuite-clone/internal/store"
 )
 
@@ -80,6 +82,35 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+}
+
+func (s *Server) handleRepeaterSend(w http.ResponseWriter, r *http.Request) {
+	if s.cfg.Repeater == nil {
+		http.Error(w, "repeater unavailable", http.StatusServiceUnavailable)
+		return
+	}
+
+	var request repeater.SendRequest
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		http.Error(w, "invalid repeater request", http.StatusBadRequest)
+		return
+	}
+	result, err := s.cfg.Repeater.Send(r.Context(), request)
+	if err != nil {
+		http.Error(w, "send repeater request", http.StatusBadGateway)
+		return
+	}
+
+	if s.cfg.Events != nil {
+		s.cfg.Events.Publish(events.Event{
+			Type: "repeater.send.completed",
+			Data: map[string]interface{}{
+				"sessionId": r.PathValue("id"),
+				"status":    result.Status,
+			},
+		})
+	}
+	writeJSON(w, http.StatusOK, result)
 }
 
 func writeJSON(w http.ResponseWriter, status int, value interface{}) {

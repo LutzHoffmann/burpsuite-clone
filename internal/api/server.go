@@ -5,6 +5,7 @@ import (
 
 	"github.com/lutzifer/burpsuite-clone/internal/certs"
 	"github.com/lutzifer/burpsuite-clone/internal/events"
+	"github.com/lutzifer/burpsuite-clone/internal/repeater"
 	"github.com/lutzifer/burpsuite-clone/internal/store"
 )
 
@@ -12,6 +13,7 @@ type Config struct {
 	Store     store.Store
 	Authority *certs.Authority
 	Events    *events.Hub
+	Repeater  *repeater.Service
 	APIAddr   string
 	ProxyAddr string
 }
@@ -31,6 +33,7 @@ func NewServer(cfg Config) *Server {
 	srv.mux.HandleFunc("GET /api/history", srv.handleHistory)
 	srv.mux.HandleFunc("GET /api/history/{id}", srv.handleHistoryDetail)
 	srv.mux.HandleFunc("GET /api/events", srv.handleEvents)
+	srv.mux.HandleFunc("POST /api/repeater/sessions/{id}/send", srv.handleRepeaterSend)
 	return srv
 }
 
