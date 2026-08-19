@@ -1,1 +1,16 @@
 .worktrees/
+.DS_Store
+bin/
+dist/
+coverage/
+*.test
+*.db
+*.sqlite
+*.sqlite3
+*.pem
+*.key
+*.crt
+.burpsuite-clone/
+projects/
+web/node_modules/
+web/dist/
