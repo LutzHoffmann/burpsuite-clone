@@ -1,9 +1,9 @@
 package proxy
 
 import (
-	"bytes"
 	"context"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"time"
@@ -34,44 +34,31 @@ func (s *Server) Serve(listener net.Listener) error {
 
 func (s *Server) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	startedAt := time.Now().UTC()
-	requestBody, err := io.ReadAll(r.Body)
-	if err != nil {
-		http.Error(w, "read request body", http.StatusBadRequest)
-		return
-	}
-	_ = r.Body.Close()
-
-	capturedRequestBody, requestTruncated, err := s.capture(requestBody)
-	if err != nil {
-		http.Error(w, "capture request body", http.StatusInternalServerError)
-		return
-	}
+	capturedRequest := newCapturingReadCloser(r.Body, s.cfg.BodyLimitBytes)
 
 	forward := r.Clone(r.Context())
 	forward.RequestURI = ""
 	forward.Header = r.Header.Clone()
-	forward.Body = io.NopCloser(bytes.NewReader(requestBody))
-	forward.ContentLength = int64(len(requestBody))
+	forward.Body = capturedRequest
 
 	response, err := s.cfg.Transport.RoundTrip(forward)
 	if err != nil {
 		http.Error(w, "forward request", http.StatusBadGateway)
 		return
 	}
-	responseBody, err := io.ReadAll(response.Body)
-	_ = response.Body.Close()
-	if err != nil {
-		http.Error(w, "read upstream response", http.StatusBadGateway)
-		return
+	capturedResponse := newCapturingReadCloser(response.Body, s.cfg.BodyLimitBytes)
+	copyHeaders(w.Header(), response.Header)
+	w.WriteHeader(response.StatusCode)
+	if _, err := io.Copy(w, capturedResponse); err != nil {
+		log.Printf("proxy: stream upstream response: %v", err)
+	}
+	if err := capturedResponse.Close(); err != nil {
+		log.Printf("proxy: close upstream response: %v", err)
 	}
 
-	capturedResponseBody, responseTruncated, err := s.capture(responseBody)
-	if err != nil {
-		http.Error(w, "capture response body", http.StatusInternalServerError)
-		return
-	}
-
-	exchange := &store.Exchange{
+	requestBody, requestTruncated := capturedRequest.Captured()
+	responseBody, responseTruncated := capturedResponse.Captured()
+	s.saveExchange(&store.Exchange{
 		Method:            r.Method,
 		Scheme:            r.URL.Scheme,
 		Host:              r.URL.Host,
@@ -79,32 +66,30 @@ func (s *Server) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		Query:             r.URL.RawQuery,
 		Status:            response.StatusCode,
 		MIMEType:          response.Header.Get("Content-Type"),
-		RequestSize:       int64(len(requestBody)),
-		ResponseSize:      int64(len(responseBody)),
+		RequestSize:       capturedRequest.Size(),
+		ResponseSize:      capturedResponse.Size(),
 		Duration:          time.Since(startedAt),
 		StartedAt:         startedAt,
 		RequestTruncated:  requestTruncated,
 		ResponseTruncated: responseTruncated,
 		Request: store.RequestData{
 			Headers: r.Header.Clone(),
-			Body:    capturedRequestBody,
+			Body:    requestBody,
 		},
 		Response: store.ResponseData{
 			Headers: response.Header.Clone(),
-			Body:    capturedResponseBody,
+			Body:    responseBody,
 		},
-	}
-	if s.cfg.Store != nil {
-		_ = s.cfg.Store.SaveExchange(context.Background(), exchange)
-	}
-
-	copyHeaders(w.Header(), response.Header)
-	w.WriteHeader(response.StatusCode)
-	_, _ = w.Write(responseBody)
+	})
 }
 
-func (s *Server) capture(body []byte) ([]byte, bool, error) {
-	return readLimitedBody(io.NopCloser(bytes.NewReader(body)), s.cfg.BodyLimitBytes)
+func (s *Server) saveExchange(exchange *store.Exchange) {
+	if s.cfg.Store == nil {
+		return
+	}
+	if err := s.cfg.Store.SaveExchange(context.Background(), exchange); err != nil {
+		log.Printf("proxy: save exchange: %v", err)
+	}
 }
 
 func copyHeaders(destination, source http.Header) {

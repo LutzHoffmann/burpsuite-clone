@@ -1,12 +1,14 @@
 package proxy
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 
 	"github.com/lutzifer/burpsuite-clone/internal/store"
@@ -46,6 +48,82 @@ func TestHTTPProxyCapturesExchange(t *testing.T) {
 	}
 	if mem.saved[0].Method != "GET" || mem.saved[0].Path != "/hello" || mem.saved[0].Status != 200 {
 		t.Fatalf("exchange = %+v", mem.saved[0])
+	}
+}
+
+func TestHTTPProxyTruncatesCapturedBodies(t *testing.T) {
+	const bodyLimit = 8
+	requestBody := "request body exceeds the limit"
+	responseBody := "response body exceeds the limit"
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(body) != requestBody {
+			t.Fatalf("request body = %q", body)
+		}
+		_, _ = w.Write([]byte(responseBody))
+	}))
+	defer target.Close()
+
+	mem := &memoryStore{}
+	srv := NewServer(Config{Store: mem, BodyLimitBytes: bodyLimit})
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() { _ = srv.Serve(ln) }()
+
+	client := &http.Client{Transport: &http.Transport{
+		Proxy: http.ProxyURL(mustParseURL(t, "http://"+ln.Addr().String())),
+	}}
+	resp, err := client.Post(target.URL, "text/plain", strings.NewReader(requestBody))
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if string(body) != responseBody {
+		t.Fatalf("response body = %q", body)
+	}
+
+	if len(mem.saved) != 1 {
+		t.Fatalf("saved exchanges = %d", len(mem.saved))
+	}
+	exchange := mem.saved[0]
+	if !exchange.RequestTruncated || !exchange.ResponseTruncated {
+		t.Fatalf("truncation flags = request:%t response:%t", exchange.RequestTruncated, exchange.ResponseTruncated)
+	}
+	if !bytes.Equal(exchange.Request.Body, []byte(requestBody[:bodyLimit])) {
+		t.Fatalf("captured request body = %q", exchange.Request.Body)
+	}
+	if !bytes.Equal(exchange.Response.Body, []byte(responseBody[:bodyLimit])) {
+		t.Fatalf("captured response body = %q", exchange.Response.Body)
+	}
+}
+
+func TestCapturingReadCloserStreamsAndBoundsCapture(t *testing.T) {
+	body := "capture this body while streaming it"
+	captured := newCapturingReadCloser(io.NopCloser(strings.NewReader(body)), 7)
+
+	forwarded, err := io.ReadAll(captured)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(forwarded) != body {
+		t.Fatalf("forwarded body = %q", forwarded)
+	}
+	stored, truncated := captured.Captured()
+	if !truncated {
+		t.Fatal("capture was not marked truncated")
+	}
+	if string(stored) != body[:7] {
+		t.Fatalf("captured body = %q", stored)
 	}
 }
 
