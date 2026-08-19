@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/lutzifer/burpsuite-clone/internal/certs"
+	"github.com/lutzifer/burpsuite-clone/internal/events"
 	"github.com/lutzifer/burpsuite-clone/internal/store"
 )
 
@@ -20,6 +21,7 @@ type Config struct {
 	BodyLimitBytes int64
 	Transport      http.RoundTripper
 	Authority      *certs.Authority
+	Events         *events.Hub
 }
 
 type Server struct {
@@ -190,6 +192,19 @@ func (s *Server) saveExchange(exchange *store.Exchange) {
 	}
 	if err := s.cfg.Store.SaveExchange(context.Background(), exchange); err != nil {
 		log.Printf("proxy: save exchange: %v", err)
+		return
+	}
+	if s.cfg.Events != nil {
+		s.cfg.Events.Publish(events.Event{
+			Type: "history.entry.created",
+			Data: map[string]interface{}{
+				"id":     exchange.ID,
+				"method": exchange.Method,
+				"host":   exchange.Host,
+				"path":   exchange.Path,
+				"status": exchange.Status,
+			},
+		})
 	}
 }
 

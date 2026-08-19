@@ -42,6 +42,7 @@ func main() {
 		Store:          history,
 		BodyLimitBytes: cfg.BodyLimitBytes,
 		Authority:      authority,
+		Events:         hub,
 	})
 	go func() {
 		if err := proxyServer.Serve(proxyListener); err != nil && err != http.ErrServerClosed {

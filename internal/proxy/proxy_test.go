@@ -14,6 +14,7 @@ import (
 	"testing"
 
 	"github.com/lutzifer/burpsuite-clone/internal/certs"
+	"github.com/lutzifer/burpsuite-clone/internal/events"
 	"github.com/lutzifer/burpsuite-clone/internal/store"
 )
 
@@ -51,6 +52,43 @@ func TestHTTPProxyCapturesExchange(t *testing.T) {
 	}
 	if mem.saved[0].Method != "GET" || mem.saved[0].Path != "/hello" || mem.saved[0].Status != 200 {
 		t.Fatalf("exchange = %+v", mem.saved[0])
+	}
+}
+
+func TestHTTPProxyPublishesHistoryEntryCreatedEvent(t *testing.T) {
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		_, _ = w.Write([]byte("target response"))
+	}))
+	defer target.Close()
+
+	hub := events.NewHub()
+	subscriber, unsubscribe := hub.Subscribe()
+	defer unsubscribe()
+
+	srv := NewServer(Config{
+		Store:          store.NewMemoryForTests(),
+		BodyLimitBytes: 1024,
+		Events:         hub,
+	})
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, target.URL+"/events", nil)
+	srv.handleHTTP(recorder, request)
+
+	select {
+	case event := <-subscriber:
+		if event.Type != "history.entry.created" {
+			t.Fatalf("event type = %q", event.Type)
+		}
+		data, ok := event.Data.(map[string]interface{})
+		if !ok {
+			t.Fatalf("event data = %T", event.Data)
+		}
+		if data["id"] != int64(1) || data["path"] != "/events" || data["status"] != http.StatusOK {
+			t.Fatalf("event data = %#v", data)
+		}
+	default:
+		t.Fatal("expected history entry created event")
 	}
 }
 
