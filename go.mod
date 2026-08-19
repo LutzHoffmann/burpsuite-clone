@@ -2,7 +2,10 @@ module github.com/lutzifer/burpsuite-clone
 
 go 1.23
 
-require modernc.org/sqlite v1.34.5
+require (
+	github.com/gorilla/websocket v1.5.3
+	modernc.org/sqlite v1.34.5
+)
 
 require (
 	github.com/dustin/go-humanize v1.0.1 // indirect
