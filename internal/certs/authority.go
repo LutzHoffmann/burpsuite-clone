@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -44,41 +45,112 @@ func LoadOrCreateAuthority(dir string) (*Authority, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, fmt.Errorf("create certificate authority directory: %w", err)
 	}
+	unlock, err := acquireDirectoryLock(dir)
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
 
 	certPath := filepath.Join(dir, caCertFile)
 	keyPath := filepath.Join(dir, caKeyFile)
-	certPEM, err := os.ReadFile(certPath)
-	if err == nil {
-		keyPEM, keyErr := os.ReadFile(keyPath)
-		if keyErr != nil {
-			return nil, fmt.Errorf("read certificate authority key: %w", keyErr)
-		}
+	certPEM, certErr := os.ReadFile(certPath)
+	keyPEM, keyErr := os.ReadFile(keyPath)
+	if certErr == nil && keyErr == nil {
 		return loadAuthority(certPEM, keyPEM, keyPath)
 	}
-	if !errors.Is(err, os.ErrNotExist) {
-		return nil, fmt.Errorf("read certificate authority certificate: %w", err)
+	if certErr != nil && !errors.Is(certErr, os.ErrNotExist) {
+		return nil, fmt.Errorf("read certificate authority certificate: %w", certErr)
 	}
-	if _, err := os.Stat(keyPath); err == nil {
-		return nil, errors.New("certificate authority key exists without certificate")
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return nil, fmt.Errorf("inspect certificate authority key: %w", err)
+	if keyErr != nil && !errors.Is(keyErr, os.ErrNotExist) {
+		return nil, fmt.Errorf("read certificate authority key: %w", keyErr)
+	}
+	if certErr == nil || keyErr == nil {
+		if certErr == nil {
+			_ = os.Remove(certPath)
+		}
+		if keyErr == nil {
+			_ = os.Remove(keyPath)
+		}
 	}
 
 	authority, err := createAuthority()
 	if err != nil {
 		return nil, err
 	}
-	keyPEM, err := pemBlockForKey(authority.key)
+	encodedKeyPEM, err := pemBlockForKey(authority.key)
 	if err != nil {
 		return nil, err
 	}
-	if err := os.WriteFile(certPath, authority.certPEM, 0o600); err != nil {
-		return nil, fmt.Errorf("write certificate authority certificate: %w", err)
-	}
-	if err := os.WriteFile(keyPath, keyPEM, 0o600); err != nil {
-		return nil, fmt.Errorf("write certificate authority key: %w", err)
+	if err := persistAuthority(certPath, authority.certPEM, keyPath, encodedKeyPEM); err != nil {
+		return nil, err
 	}
 	return authority, nil
+}
+
+func acquireDirectoryLock(dir string) (func(), error) {
+	lock, err := os.OpenFile(filepath.Join(dir, ".ca.lock"), os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, fmt.Errorf("open certificate authority lock: %w", err)
+	}
+	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
+		_ = lock.Close()
+		return nil, fmt.Errorf("lock certificate authority directory: %w", err)
+	}
+	return func() {
+		_ = syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
+		_ = lock.Close()
+	}, nil
+}
+
+func persistAuthority(certPath string, certPEM []byte, keyPath string, keyPEM []byte) error {
+	certTemp, err := writeTempFile(filepath.Dir(certPath), certPEM)
+	if err != nil {
+		return fmt.Errorf("stage certificate authority certificate: %w", err)
+	}
+	defer os.Remove(certTemp)
+	keyTemp, err := writeTempFile(filepath.Dir(keyPath), keyPEM)
+	if err != nil {
+		return fmt.Errorf("stage certificate authority key: %w", err)
+	}
+	defer os.Remove(keyTemp)
+
+	if err := os.Rename(keyTemp, keyPath); err != nil {
+		return fmt.Errorf("persist certificate authority key: %w", err)
+	}
+	if err := os.Rename(certTemp, certPath); err != nil {
+		_ = os.Remove(keyPath)
+		return fmt.Errorf("persist certificate authority certificate: %w", err)
+	}
+	return nil
+}
+
+func writeTempFile(dir string, data []byte) (string, error) {
+	temp, err := os.CreateTemp(dir, ".ca-*")
+	if err != nil {
+		return "", err
+	}
+	path := temp.Name()
+	cleanup := true
+	defer func() {
+		_ = temp.Close()
+		if cleanup {
+			_ = os.Remove(path)
+		}
+	}()
+	if err := temp.Chmod(0o600); err != nil {
+		return "", err
+	}
+	if _, err := temp.Write(data); err != nil {
+		return "", err
+	}
+	if err := temp.Sync(); err != nil {
+		return "", err
+	}
+	if err := temp.Close(); err != nil {
+		return "", err
+	}
+	cleanup = false
+	return path, nil
 }
 
 func createAuthority() (*Authority, error) {
@@ -132,6 +204,10 @@ func loadAuthority(certPEM, keyPEM []byte, keyPath string) (*Authority, error) {
 	if err != nil {
 		return nil, fmt.Errorf("parse certificate authority key: %w", err)
 	}
+	publicKey, ok := cert.PublicKey.(*rsa.PublicKey)
+	if !ok || publicKey.N.Cmp(key.N) != 0 || publicKey.E != key.E {
+		return nil, errors.New("certificate authority certificate and key do not match")
+	}
 	if err := os.Chmod(keyPath, 0o600); err != nil {
 		return nil, fmt.Errorf("restrict certificate authority key permissions: %w", err)
 	}
@@ -172,7 +248,7 @@ func (a *Authority) CertificateForHost(host string) (tls.Certificate, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if certificate, ok := a.cache[host]; ok {
-		return certificate, nil
+		return cloneTLSCertificate(certificate), nil
 	}
 
 	key, err := rsa.GenerateKey(rand.Reader, keyBits)
@@ -204,5 +280,14 @@ func (a *Authority) CertificateForHost(host string) (tls.Certificate, error) {
 	}
 	certificate := tls.Certificate{Certificate: [][]byte{der, a.cert.Raw}, PrivateKey: key}
 	a.cache[host] = certificate
-	return certificate, nil
+	return cloneTLSCertificate(certificate), nil
+}
+
+func cloneTLSCertificate(certificate tls.Certificate) tls.Certificate {
+	clone := certificate
+	clone.Certificate = make([][]byte, len(certificate.Certificate))
+	for i, der := range certificate.Certificate {
+		clone.Certificate[i] = append([]byte(nil), der...)
+	}
+	return clone
 }
