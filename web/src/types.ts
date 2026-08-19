@@ -4,6 +4,7 @@ export interface StatusDTO {
   caFingerprint: string;
   caTrust: 'manual' | 'unavailable';
   httpsInterception: boolean;
+  activeProject?: { id: number; name: string; createdAt: string } | null;
 }
 
 export interface HistoryItem {
@@ -23,28 +24,22 @@ export interface HistoryItem {
   error: boolean;
 }
 
-export interface Exchange {
-  ID: number;
-  Method: string;
-  Scheme: string;
-  Host: string;
-  Path: string;
-  Query: string;
-  Status: number;
-  MIMEType: string;
-  RequestSize: number;
-  ResponseSize: number;
-  Duration: number;
-  StartedAt: string;
-  Intercepted: boolean;
-  Error: boolean;
-  ErrorMessage: string;
-  RequestTruncated: boolean;
-  ResponseTruncated: boolean;
-  Request: { Headers: Record<string, string[]>; Body: string; Raw: string };
-  Response: { Headers: Record<string, string[]>; Body: string; Raw: string };
-  Tags: string[];
-  Note: string;
+export interface MessageDetail {
+  headers: Record<string, string[]>;
+  body: string;
+  raw: string;
+  textSafe: boolean;
+  truncated: boolean;
+}
+
+export interface Exchange extends HistoryItem {
+  errorMessage: string;
+  requestTruncated: boolean;
+  responseTruncated: boolean;
+  request: MessageDetail;
+  response: MessageDetail;
+  tags: string[];
+  note: string;
 }
 
 export interface SendRequest {
@@ -62,6 +57,7 @@ export interface SendResult {
   size: number;
   truncated: boolean;
   contentType: string;
+  textSafe?: boolean;
 }
 
 export interface InterceptItem {
@@ -70,4 +66,19 @@ export interface InterceptItem {
   url: string;
   headers: Record<string, string[]>;
   body: string;
+  bodyEditable: boolean;
+  bodyTruncated: boolean;
+}
+
+export interface InterceptRule {
+  enabled: boolean;
+  method: string;
+  hostContains: string;
+  pathContains: string;
+  mimeContains: string;
+}
+
+export interface InterceptConfig {
+  enabled: boolean;
+  rules: InterceptRule[];
 }

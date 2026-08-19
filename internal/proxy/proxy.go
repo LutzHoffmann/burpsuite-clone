@@ -2,18 +2,33 @@ package proxy
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"io"
 	"log"
+	"mime"
 	"net"
 	"net/http"
+	"net/url"
+	"strconv"
+	"strings"
+	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/lutzifer/burpsuite-clone/internal/certs"
 	"github.com/lutzifer/burpsuite-clone/internal/events"
+	"github.com/lutzifer/burpsuite-clone/internal/intercept"
 	"github.com/lutzifer/burpsuite-clone/internal/store"
+)
+
+const (
+	serverReadHeaderTimeout = 10 * time.Second
+	serverIdleTimeout       = 2 * time.Minute
+	tunnelIOTimeout         = 2 * time.Minute
 )
 
 type Config struct {
@@ -22,21 +37,46 @@ type Config struct {
 	Transport      http.RoundTripper
 	Authority      *certs.Authority
 	Events         *events.Hub
+	Intercept      *intercept.Controller
 }
 
 type Server struct {
-	cfg Config
+	cfg    Config
+	nextID atomic.Uint64
+}
+
+type preparedRequest struct {
+	forward     *http.Request
+	capture     *capturingReadCloser
+	headers     http.Header
+	intercepted bool
+	dropped     bool
+	droppedBody []byte
 }
 
 func NewServer(cfg Config) *Server {
 	if cfg.Transport == nil {
-		cfg.Transport = http.DefaultTransport
+		cfg.Transport = defaultTransport()
 	}
 	return &Server{cfg: cfg}
 }
 
+func defaultTransport() *http.Transport {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.DialContext = (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}).DialContext
+	transport.TLSHandshakeTimeout = 10 * time.Second
+	transport.ResponseHeaderTimeout = 30 * time.Second
+	transport.IdleConnTimeout = 90 * time.Second
+	return transport
+}
+
 func (s *Server) Serve(listener net.Listener) error {
-	return (&http.Server{Handler: http.HandlerFunc(s.handleHTTP)}).Serve(listener)
+	server := &http.Server{
+		Handler:           http.HandlerFunc(s.handleHTTP),
+		ReadHeaderTimeout: serverReadHeaderTimeout,
+		IdleTimeout:       serverIdleTimeout,
+	}
+	return server.Serve(listener)
 }
 
 func (s *Server) handleHTTP(w http.ResponseWriter, r *http.Request) {
@@ -46,53 +86,39 @@ func (s *Server) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	startedAt := time.Now().UTC()
-	capturedRequest := newCapturingReadCloser(r.Body, s.cfg.BodyLimitBytes)
-
-	forward := r.Clone(r.Context())
-	forward.RequestURI = ""
-	forward.Header = r.Header.Clone()
-	forward.Body = capturedRequest
-
-	response, err := s.cfg.Transport.RoundTrip(forward)
+	prepared, err := s.prepareRequest(r)
 	if err != nil {
+		s.savePreparationFailure(r, startedAt, err)
+		http.Error(w, "intercept request", http.StatusGatewayTimeout)
+		return
+	}
+	if prepared.dropped {
+		s.saveDroppedExchange(r, prepared, startedAt)
+		http.Error(w, "request dropped", http.StatusForbidden)
+		return
+	}
+
+	response, err := s.cfg.Transport.RoundTrip(prepared.forward)
+	if err != nil {
+		s.saveRoundTripFailure(prepared, startedAt, err)
 		http.Error(w, "forward request", http.StatusBadGateway)
 		return
 	}
 	capturedResponse := newCapturingReadCloser(response.Body, s.cfg.BodyLimitBytes)
-	copyHeaders(w.Header(), response.Header)
+	responseHeaders := response.Header.Clone()
+	clientHeaders := response.Header.Clone()
+	stripHopByHopHeaders(clientHeaders)
+	copyHeaders(w.Header(), clientHeaders)
 	w.WriteHeader(response.StatusCode)
-	if _, err := io.Copy(w, capturedResponse); err != nil {
-		log.Printf("proxy: stream upstream response: %v", err)
+	_, copyErr := io.Copy(w, capturedResponse)
+	closeErr := capturedResponse.Close()
+	if copyErr != nil {
+		log.Printf("proxy: stream upstream response: %v", copyErr)
 	}
-	if err := capturedResponse.Close(); err != nil {
-		log.Printf("proxy: close upstream response: %v", err)
+	if closeErr != nil {
+		log.Printf("proxy: close upstream response: %v", closeErr)
 	}
-
-	requestBody, requestTruncated := capturedRequest.Captured()
-	responseBody, responseTruncated := capturedResponse.Captured()
-	s.saveExchange(&store.Exchange{
-		Method:            r.Method,
-		Scheme:            r.URL.Scheme,
-		Host:              r.URL.Host,
-		Path:              r.URL.Path,
-		Query:             r.URL.RawQuery,
-		Status:            response.StatusCode,
-		MIMEType:          response.Header.Get("Content-Type"),
-		RequestSize:       capturedRequest.Size(),
-		ResponseSize:      capturedResponse.Size(),
-		Duration:          time.Since(startedAt),
-		StartedAt:         startedAt,
-		RequestTruncated:  requestTruncated,
-		ResponseTruncated: responseTruncated,
-		Request: store.RequestData{
-			Headers: r.Header.Clone(),
-			Body:    requestBody,
-		},
-		Response: store.ResponseData{
-			Headers: response.Header.Clone(),
-			Body:    responseBody,
-		},
-	})
+	s.saveCompletedExchange(prepared, response, responseHeaders, capturedResponse, startedAt, errors.Join(copyErr, closeErr))
 }
 
 func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
@@ -123,67 +149,218 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	tlsClient := tls.Server(client, &tls.Config{Certificates: []tls.Certificate{certificate}})
+	tlsClient := tls.Server(client, &tls.Config{Certificates: []tls.Certificate{certificate}, MinVersion: tls.VersionTLS12})
 	defer tlsClient.Close()
-	inner, err := http.ReadRequest(bufio.NewReader(tlsClient))
-	if err != nil {
-		log.Printf("proxy: read CONNECT request: %v", err)
+	_ = tlsClient.SetDeadline(time.Now().Add(tunnelIOTimeout))
+	if err := tlsClient.Handshake(); err != nil {
+		log.Printf("proxy: handshake CONNECT client: %v", err)
 		return
 	}
-	inner.URL.Scheme = "https"
-	inner.URL.Host = host
-
-	s.forwardHTTPS(tlsClient, inner)
+	reader := bufio.NewReader(tlsClient)
+	for {
+		_ = tlsClient.SetReadDeadline(time.Now().Add(tunnelIOTimeout))
+		inner, err := http.ReadRequest(reader)
+		if err != nil {
+			if !errors.Is(err, io.EOF) && !isTimeout(err) {
+				log.Printf("proxy: read CONNECT request: %v", err)
+			}
+			return
+		}
+		inner.URL.Scheme = "https"
+		inner.URL.Host = host
+		inner.RequestURI = inner.URL.RequestURI()
+		if !s.forwardHTTPS(tlsClient, inner) {
+			return
+		}
+	}
 }
 
-func (s *Server) forwardHTTPS(client net.Conn, request *http.Request) {
+func (s *Server) forwardHTTPS(client net.Conn, request *http.Request) bool {
 	startedAt := time.Now().UTC()
-	capturedRequest := newCapturingReadCloser(request.Body, s.cfg.BodyLimitBytes)
+	prepared, err := s.prepareRequest(request)
+	if err != nil {
+		s.savePreparationFailure(request, startedAt, err)
+		return writeTunnelError(client, request, http.StatusGatewayTimeout, "intercept request")
+	}
+	if prepared.dropped {
+		s.saveDroppedExchange(request, prepared, startedAt)
+		return writeTunnelError(client, request, http.StatusForbidden, "request dropped")
+	}
 
+	response, err := s.cfg.Transport.RoundTrip(prepared.forward)
+	if err != nil {
+		s.saveRoundTripFailure(prepared, startedAt, err)
+		return writeTunnelError(client, request, http.StatusBadGateway, "forward request")
+	}
+	capturedResponse := newCapturingReadCloser(response.Body, s.cfg.BodyLimitBytes)
+	responseHeaders := response.Header.Clone()
+	stripHopByHopHeaders(response.Header)
+	response.Body = capturedResponse
+	_ = client.SetWriteDeadline(time.Now().Add(tunnelIOTimeout))
+	writeErr := response.Write(client)
+	closeErr := capturedResponse.Close()
+	if writeErr != nil {
+		log.Printf("proxy: stream HTTPS upstream response: %v", writeErr)
+	}
+	if closeErr != nil {
+		log.Printf("proxy: close HTTPS upstream response: %v", closeErr)
+	}
+	s.saveCompletedExchange(prepared, response, responseHeaders, capturedResponse, startedAt, errors.Join(writeErr, closeErr))
+	return writeErr == nil && !request.Close && !response.Close
+}
+
+func (s *Server) prepareRequest(request *http.Request) (*preparedRequest, error) {
+	if s.cfg.Intercept == nil || !s.cfg.Intercept.Matches(intercept.MatchRequest{
+		Method: request.Method,
+		Host:   request.URL.Host,
+		Path:   request.URL.Path,
+		MIME:   request.Header.Get("Content-Type"),
+	}) {
+		return prepareStreamingRequest(request, s.cfg.BodyLimitBytes), nil
+	}
+
+	body, tooLarge, err := readInterceptBody(request.Body, s.cfg.BodyLimitBytes)
+	if err != nil {
+		return nil, err
+	}
+	if tooLarge {
+		request.Body = &prefixReadCloser{Reader: io.MultiReader(bytes.NewReader(body), request.Body), closer: request.Body}
+		return prepareStreamingRequest(request, s.cfg.BodyLimitBytes), nil
+	}
+	_ = request.Body.Close()
+
+	item := intercept.Item{
+		ID:           strconv.FormatUint(s.nextID.Add(1), 10),
+		Method:       request.Method,
+		URL:          request.URL.String(),
+		Headers:      request.Header.Clone(),
+		Body:         body,
+		BodyEditable: isTextSafe(request.Header.Get("Content-Type"), body),
+	}
+	decision, err := s.cfg.Intercept.Queue().Enqueue(request.Context(), item)
+	if err != nil {
+		return nil, err
+	}
+	if decision.Action == intercept.ActionDrop {
+		return &preparedRequest{
+			headers: request.Header.Clone(), intercepted: true, dropped: true, droppedBody: body,
+		}, nil
+	}
+
+	method := decision.Edit.Method
+	if method == "" {
+		method = item.Method
+	}
+	rawURL := decision.Edit.URL
+	if rawURL == "" {
+		rawURL = item.URL
+	}
+	parsedURL, err := url.Parse(rawURL)
+	if err != nil || parsedURL.Scheme == "" || parsedURL.Host == "" {
+		return nil, fmt.Errorf("invalid intercepted request URL")
+	}
+	headers := decision.Edit.Headers
+	if headers == nil {
+		headers = item.Headers
+	}
+	editedBody := body
+	if item.BodyEditable && (decision.Edit.BodySet || decision.Edit.Body != nil) {
+		editedBody = decision.Edit.Body
+	}
+	forward := request.Clone(request.Context())
+	forward.Method = method
+	forward.URL = parsedURL
+	forward.Host = parsedURL.Host
+	forward.RequestURI = ""
+	forward.Header = cloneHeaders(headers)
+	capture := newCapturingReadCloser(io.NopCloser(bytes.NewReader(editedBody)), s.cfg.BodyLimitBytes)
+	forward.Body = capture
+	forward.ContentLength = int64(len(editedBody))
+	stripHopByHopHeaders(forward.Header)
+	return &preparedRequest{forward: forward, capture: capture, headers: cloneHeaders(headers), intercepted: true}, nil
+}
+
+func prepareStreamingRequest(request *http.Request, bodyLimit int64) *preparedRequest {
+	capture := newCapturingReadCloser(request.Body, bodyLimit)
 	forward := request.Clone(request.Context())
 	forward.RequestURI = ""
 	forward.Header = request.Header.Clone()
-	forward.Body = capturedRequest
+	forward.Body = capture
+	stripHopByHopHeaders(forward.Header)
+	return &preparedRequest{forward: forward, capture: capture, headers: request.Header.Clone()}
+}
 
-	response, err := s.cfg.Transport.RoundTrip(forward)
+func readInterceptBody(body io.ReadCloser, limit int64) ([]byte, bool, error) {
+	if body == nil || body == http.NoBody {
+		return nil, false, nil
+	}
+	if limit < 0 {
+		limit = 0
+	}
+	data, err := io.ReadAll(io.LimitReader(body, limit+1))
 	if err != nil {
-		log.Printf("proxy: forward HTTPS request: %v", err)
-		return
+		return nil, false, fmt.Errorf("read intercepted request body: %w", err)
 	}
-	capturedResponse := newCapturingReadCloser(response.Body, s.cfg.BodyLimitBytes)
-	response.Body = capturedResponse
-	if err := response.Write(client); err != nil {
-		log.Printf("proxy: stream HTTPS upstream response: %v", err)
-	}
-	if err := capturedResponse.Close(); err != nil {
-		log.Printf("proxy: close HTTPS upstream response: %v", err)
-	}
+	return data, int64(len(data)) > limit, nil
+}
 
-	requestBody, requestTruncated := capturedRequest.Captured()
+func (s *Server) saveCompletedExchange(prepared *preparedRequest, response *http.Response, responseHeaders http.Header, capturedResponse *capturingReadCloser, startedAt time.Time, operationErr error) {
+	requestBody, requestTruncated := prepared.capture.Captured()
 	responseBody, responseTruncated := capturedResponse.Captured()
+	exchange := s.exchangeFromPrepared(prepared, startedAt)
+	exchange.Status = response.StatusCode
+	exchange.MIMEType = responseHeaders.Get("Content-Type")
+	exchange.RequestSize = prepared.capture.Size()
+	exchange.ResponseSize = capturedResponse.Size()
+	exchange.RequestTruncated = requestTruncated
+	exchange.ResponseTruncated = responseTruncated
+	exchange.Request.Body = requestBody
+	exchange.Response = store.ResponseData{Headers: responseHeaders, Body: responseBody}
+	if operationErr != nil {
+		exchange.Error = true
+		exchange.ErrorMessage = operationErr.Error()
+	}
+	s.saveExchange(exchange)
+}
+
+func (s *Server) saveRoundTripFailure(prepared *preparedRequest, startedAt time.Time, operationErr error) {
+	requestBody, requestTruncated := prepared.capture.Captured()
+	exchange := s.exchangeFromPrepared(prepared, startedAt)
+	exchange.RequestSize = prepared.capture.Size()
+	exchange.RequestTruncated = requestTruncated
+	exchange.Request.Body = requestBody
+	exchange.Error = true
+	exchange.ErrorMessage = operationErr.Error()
+	s.saveExchange(exchange)
+}
+
+func (s *Server) savePreparationFailure(request *http.Request, startedAt time.Time, operationErr error) {
 	s.saveExchange(&store.Exchange{
-		Method:            request.Method,
-		Scheme:            request.URL.Scheme,
-		Host:              request.URL.Host,
-		Path:              request.URL.Path,
-		Query:             request.URL.RawQuery,
-		Status:            response.StatusCode,
-		MIMEType:          response.Header.Get("Content-Type"),
-		RequestSize:       capturedRequest.Size(),
-		ResponseSize:      capturedResponse.Size(),
-		Duration:          time.Since(startedAt),
-		StartedAt:         startedAt,
-		RequestTruncated:  requestTruncated,
-		ResponseTruncated: responseTruncated,
-		Request: store.RequestData{
-			Headers: request.Header.Clone(),
-			Body:    requestBody,
-		},
-		Response: store.ResponseData{
-			Headers: response.Header.Clone(),
-			Body:    responseBody,
-		},
+		Method: request.Method, Scheme: request.URL.Scheme, Host: request.URL.Host,
+		Path: request.URL.Path, Query: request.URL.RawQuery, Duration: time.Since(startedAt),
+		StartedAt: startedAt, Error: true, ErrorMessage: operationErr.Error(),
+		Request: store.RequestData{Headers: request.Header.Clone()},
 	})
+}
+
+func (s *Server) saveDroppedExchange(request *http.Request, prepared *preparedRequest, startedAt time.Time) {
+	s.saveExchange(&store.Exchange{
+		Method: request.Method, Scheme: request.URL.Scheme, Host: request.URL.Host,
+		Path: request.URL.Path, Query: request.URL.RawQuery, Duration: time.Since(startedAt),
+		StartedAt: startedAt, Intercepted: true, Error: true, ErrorMessage: "request dropped by operator",
+		RequestSize: int64(len(prepared.droppedBody)),
+		Request:     store.RequestData{Headers: prepared.headers, Body: append([]byte(nil), prepared.droppedBody...)},
+	})
+}
+
+func (s *Server) exchangeFromPrepared(prepared *preparedRequest, startedAt time.Time) *store.Exchange {
+	request := prepared.forward
+	return &store.Exchange{
+		Method: request.Method, Scheme: request.URL.Scheme, Host: request.URL.Host,
+		Path: request.URL.Path, Query: request.URL.RawQuery, Duration: time.Since(startedAt),
+		StartedAt: startedAt, Intercepted: prepared.intercepted,
+		Request: store.RequestData{Headers: prepared.headers},
+	}
 }
 
 func (s *Server) saveExchange(exchange *store.Exchange) {
@@ -198,18 +375,80 @@ func (s *Server) saveExchange(exchange *store.Exchange) {
 		s.cfg.Events.Publish(events.Event{
 			Type: "history.entry.created",
 			Data: map[string]interface{}{
-				"id":     exchange.ID,
-				"method": exchange.Method,
-				"host":   exchange.Host,
-				"path":   exchange.Path,
-				"status": exchange.Status,
+				"id": exchange.ID, "method": exchange.Method, "host": exchange.Host,
+				"path": exchange.Path, "status": exchange.Status,
 			},
 		})
 	}
+}
+
+func stripHopByHopHeaders(headers http.Header) {
+	for _, token := range strings.Split(headers.Get("Connection"), ",") {
+		if name := strings.TrimSpace(token); name != "" {
+			headers.Del(name)
+		}
+	}
+	for _, name := range []string{
+		"Connection", "Keep-Alive", "Proxy-Authenticate", "Proxy-Authorization",
+		"Proxy-Connection", "TE", "Trailer", "Transfer-Encoding", "Upgrade",
+	} {
+		headers.Del(name)
+	}
+}
+
+func cloneHeaders(headers map[string][]string) http.Header {
+	cloned := make(http.Header, len(headers))
+	for name, values := range headers {
+		cloned[name] = append([]string(nil), values...)
+	}
+	return cloned
 }
 
 func copyHeaders(destination, source http.Header) {
 	for key, values := range source {
 		destination[key] = append([]string(nil), values...)
 	}
+}
+
+func isTextSafe(contentType string, body []byte) bool {
+	if len(body) == 0 {
+		return true
+	}
+	if !utf8.Valid(body) {
+		return false
+	}
+	mediaType, _, err := mime.ParseMediaType(contentType)
+	if err != nil {
+		return false
+	}
+	return strings.HasPrefix(mediaType, "text/") || strings.Contains(mediaType, "json") ||
+		strings.Contains(mediaType, "xml") || mediaType == "application/x-www-form-urlencoded"
+}
+
+func writeTunnelError(client net.Conn, request *http.Request, status int, message string) bool {
+	body := []byte(message + "\n")
+	response := &http.Response{
+		StatusCode: status, Status: fmt.Sprintf("%d %s", status, http.StatusText(status)),
+		Proto: "HTTP/1.1", ProtoMajor: 1, ProtoMinor: 1,
+		Header: http.Header{"Content-Type": {"text/plain; charset=utf-8"}},
+		Body:   io.NopCloser(bytes.NewReader(body)), ContentLength: int64(len(body)), Request: request,
+	}
+	if err := response.Write(client); err != nil {
+		return false
+	}
+	return !request.Close
+}
+
+func isTimeout(err error) bool {
+	var netErr net.Error
+	return errors.As(err, &netErr) && netErr.Timeout()
+}
+
+type prefixReadCloser struct {
+	io.Reader
+	closer io.Closer
+}
+
+func (r *prefixReadCloser) Close() error {
+	return r.closer.Close()
 }

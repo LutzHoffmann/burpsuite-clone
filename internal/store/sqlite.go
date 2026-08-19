@@ -127,7 +127,7 @@ func (s *SQLiteStore) ListHistory(ctx context.Context, filter HistoryFilter) ([]
 	}
 	defer rows.Close()
 
-	var items []HistoryItem
+	items := make([]HistoryItem, 0)
 	for rows.Next() {
 		var item HistoryItem
 		var startedAt int64

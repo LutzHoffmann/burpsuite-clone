@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"time"
 )
@@ -33,7 +34,12 @@ type Service struct {
 
 func NewService(transport http.RoundTripper, bodyLimitBytes int64) *Service {
 	if transport == nil {
-		transport = http.DefaultTransport
+		defaultTransport := http.DefaultTransport.(*http.Transport).Clone()
+		defaultTransport.DialContext = (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}).DialContext
+		defaultTransport.TLSHandshakeTimeout = 10 * time.Second
+		defaultTransport.ResponseHeaderTimeout = 30 * time.Second
+		defaultTransport.IdleConnTimeout = 90 * time.Second
+		transport = defaultTransport
 	}
 	if bodyLimitBytes < 0 {
 		bodyLimitBytes = 0

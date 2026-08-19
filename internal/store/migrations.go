@@ -12,6 +12,52 @@ type migration struct {
 
 var migrations = []migration{
 	{version: 1, apply: applyInitialSchema},
+	{version: 2, apply: applyProjectAndRepeaterSchema},
+}
+
+func applyProjectAndRepeaterSchema(tx *sql.Tx) error {
+	_, err := tx.Exec(`
+		CREATE TABLE IF NOT EXISTS projects (
+			id INTEGER PRIMARY KEY,
+			name TEXT NOT NULL,
+			created_at_unix_nano INTEGER NOT NULL
+		);
+		INSERT OR IGNORE INTO projects (id, name, created_at_unix_nano)
+			VALUES (1, 'Default Project', 0);
+		ALTER TABLE exchanges ADD COLUMN project_id INTEGER NOT NULL DEFAULT 1;
+
+		CREATE TABLE IF NOT EXISTS settings (
+			key TEXT PRIMARY KEY,
+			value TEXT NOT NULL
+		);
+
+		CREATE TABLE IF NOT EXISTS repeater_sessions (
+			id TEXT PRIMARY KEY,
+			project_id INTEGER NOT NULL REFERENCES projects(id),
+			name TEXT NOT NULL,
+			created_at_unix_nano INTEGER NOT NULL,
+			updated_at_unix_nano INTEGER NOT NULL
+		);
+
+		CREATE TABLE IF NOT EXISTS repeater_sends (
+			id INTEGER PRIMARY KEY,
+			session_id TEXT NOT NULL REFERENCES repeater_sessions(id) ON DELETE CASCADE,
+			method TEXT NOT NULL,
+			url TEXT NOT NULL,
+			request_headers_json TEXT NOT NULL,
+			request_body TEXT NOT NULL,
+			status INTEGER NOT NULL,
+			response_headers_json TEXT NOT NULL,
+			response_body TEXT NOT NULL,
+			duration_ms INTEGER NOT NULL,
+			size INTEGER NOT NULL,
+			truncated INTEGER NOT NULL,
+			content_type TEXT NOT NULL,
+			sent_at_unix_nano INTEGER NOT NULL
+		);
+		CREATE INDEX IF NOT EXISTS repeater_sends_session_id
+			ON repeater_sends(session_id, id DESC);`)
+	return err
 }
 
 func applyMigrations(db *sql.DB) error {

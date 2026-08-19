@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import type { SendRequest, SendResult } from '../types';
 
 type RepeaterProps = {
@@ -24,6 +24,13 @@ export function Repeater({ initialRequest, result, onSend }: RepeaterProps) {
   const [url, setUrl] = useState(initialRequest.url);
   const [headers, setHeaders] = useState(formatHeaders(initialRequest.headers));
   const [body, setBody] = useState(initialRequest.body);
+
+  useEffect(() => {
+    setMethod(initialRequest.method);
+    setUrl(initialRequest.url);
+    setHeaders(formatHeaders(initialRequest.headers));
+    setBody(initialRequest.body);
+  }, [initialRequest]);
 
   const send = () => onSend({ method, url, headers: parseHeaders(headers), body });
 

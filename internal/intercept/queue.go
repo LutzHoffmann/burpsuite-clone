@@ -15,11 +15,13 @@ const (
 )
 
 type Item struct {
-	ID      string              `json:"id"`
-	Method  string              `json:"method"`
-	URL     string              `json:"url"`
-	Headers map[string][]string `json:"headers"`
-	Body    []byte              `json:"body"`
+	ID            string              `json:"id"`
+	Method        string              `json:"method"`
+	URL           string              `json:"url"`
+	Headers       map[string][]string `json:"headers"`
+	Body          []byte              `json:"-"`
+	BodyEditable  bool                `json:"bodyEditable"`
+	BodyTruncated bool                `json:"bodyTruncated"`
 }
 
 type RequestEdit struct {
@@ -27,6 +29,7 @@ type RequestEdit struct {
 	URL     string              `json:"url"`
 	Headers map[string][]string `json:"headers"`
 	Body    []byte              `json:"body"`
+	BodySet bool                `json:"-"`
 }
 
 type Decision struct {
@@ -35,10 +38,17 @@ type Decision struct {
 }
 
 type Queue struct {
-	mu      sync.Mutex
-	items   map[string]Item
-	waiting map[string]chan Decision
-	timeout time.Duration
+	mu       sync.Mutex
+	items    map[string]Item
+	waiting  map[string]chan Decision
+	timeout  time.Duration
+	observer func(Change)
+}
+
+type Change struct {
+	Type   string
+	Item   Item
+	Action Action
 }
 
 func NewQueue(timeout time.Duration) *Queue {
@@ -59,7 +69,11 @@ func (q *Queue) Enqueue(ctx context.Context, item Item) (Decision, error) {
 	}
 	q.items[item.ID] = item
 	q.waiting[item.ID] = result
+	observer := q.observer
 	q.mu.Unlock()
+	if observer != nil {
+		observer(Change{Type: "queued", Item: cloneItem(item)})
+	}
 
 	timer := time.NewTimer(q.timeout)
 	defer timer.Stop()
@@ -94,9 +108,22 @@ func (q *Queue) List() []Item {
 
 	items := make([]Item, 0, len(q.items))
 	for _, item := range q.items {
-		items = append(items, item)
+		items = append(items, cloneItem(item))
 	}
 	return items
+}
+
+func (q *Queue) Get(id string) (Item, bool) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	item, ok := q.items[id]
+	return cloneItem(item), ok
+}
+
+func (q *Queue) SetObserver(observer func(Change)) {
+	q.mu.Lock()
+	q.observer = observer
+	q.mu.Unlock()
 }
 
 func (q *Queue) decide(id string, decision Decision) error {
@@ -106,22 +133,44 @@ func (q *Queue) decide(id string, decision Decision) error {
 		q.mu.Unlock()
 		return fmt.Errorf("intercept item %q not found", id)
 	}
+	item := q.items[id]
 	delete(q.items, id)
 	delete(q.waiting, id)
+	observer := q.observer
 	q.mu.Unlock()
 
 	result <- decision
+	if observer != nil {
+		observer(Change{Type: "completed", Item: cloneItem(item), Action: decision.Action})
+	}
 	return nil
 }
 
 func (q *Queue) remove(id string, result chan Decision) bool {
 	q.mu.Lock()
-	defer q.mu.Unlock()
 
 	if current, exists := q.waiting[id]; !exists || current != result {
+		q.mu.Unlock()
 		return false
 	}
+	item := q.items[id]
 	delete(q.items, id)
 	delete(q.waiting, id)
+	observer := q.observer
+	q.mu.Unlock()
+	if observer != nil {
+		observer(Change{Type: "completed", Item: cloneItem(item)})
+	}
 	return true
+}
+
+func cloneItem(item Item) Item {
+	item.Body = append([]byte(nil), item.Body...)
+	if item.Headers != nil {
+		item.Headers = make(map[string][]string, len(item.Headers))
+		for name, values := range item.Headers {
+			item.Headers[name] = append([]string(nil), values...)
+		}
+	}
+	return item
 }

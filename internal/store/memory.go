@@ -32,7 +32,7 @@ func (s *memoryStore) ListHistory(_ context.Context, filter HistoryFilter) ([]Hi
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	var history []HistoryItem
+	history := make([]HistoryItem, 0)
 	for index := len(s.exchanges) - 1; index >= 0; index-- {
 		exchange := s.exchanges[index]
 		if !matchesHistoryFilter(exchange, filter) {

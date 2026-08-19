@@ -5,16 +5,21 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"errors"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/lutzifer/burpsuite-clone/internal/certs"
 	"github.com/lutzifer/burpsuite-clone/internal/events"
+	"github.com/lutzifer/burpsuite-clone/internal/intercept"
 	"github.com/lutzifer/burpsuite-clone/internal/store"
 )
 
@@ -47,11 +52,9 @@ func TestHTTPProxyCapturesExchange(t *testing.T) {
 	if string(body) != "target response" {
 		t.Fatalf("body = %q", body)
 	}
-	if len(mem.saved) != 1 {
-		t.Fatalf("saved exchanges = %d", len(mem.saved))
-	}
-	if mem.saved[0].Method != "GET" || mem.saved[0].Path != "/hello" || mem.saved[0].Status != 200 {
-		t.Fatalf("exchange = %+v", mem.saved[0])
+	saved := waitForSavedExchanges(t, mem, 1)
+	if saved[0].Method != "GET" || saved[0].Path != "/hello" || saved[0].Status != 200 {
+		t.Fatalf("exchange = %+v", saved[0])
 	}
 }
 
@@ -133,10 +136,7 @@ func TestHTTPProxyTruncatesCapturedBodies(t *testing.T) {
 		t.Fatalf("response body = %q", body)
 	}
 
-	if len(mem.saved) != 1 {
-		t.Fatalf("saved exchanges = %d", len(mem.saved))
-	}
-	exchange := mem.saved[0]
+	exchange := waitForSavedExchanges(t, mem, 1)[0]
 	if !exchange.RequestTruncated || !exchange.ResponseTruncated {
 		t.Fatalf("truncation flags = request:%t response:%t", exchange.RequestTruncated, exchange.ResponseTruncated)
 	}
@@ -197,11 +197,194 @@ func TestHTTPSProxyMITMCapturesExchange(t *testing.T) {
 	if string(body) != `{"ok":true}` {
 		t.Fatalf("body = %q", body)
 	}
-	if len(mem.saved) != 1 {
-		t.Fatalf("saved exchanges = %d", len(mem.saved))
+	saved := waitForSavedExchanges(t, mem, 1)
+	if saved[0].Scheme != "https" || saved[0].Path != "/secure" {
+		t.Fatalf("exchange = %+v", saved[0])
 	}
-	if mem.saved[0].Scheme != "https" || mem.saved[0].Path != "/secure" {
-		t.Fatalf("exchange = %+v", mem.saved[0])
+}
+
+func TestHTTPProxyInterceptBlocksUntilForward(t *testing.T) {
+	targetReached := make(chan struct{}, 1)
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		targetReached <- struct{}{}
+		body, _ := io.ReadAll(r.Body)
+		_, _ = w.Write(body)
+	}))
+	defer target.Close()
+
+	queue := intercept.NewQueue(2 * time.Second)
+	controller := intercept.NewController(queue, true, []intercept.Rule{{Enabled: true}})
+	srv := NewServer(Config{Store: store.NewMemoryForTests(), BodyLimitBytes: 1024, Intercept: controller})
+	ln := listenForTest(t)
+	defer ln.Close()
+	go func() { _ = srv.Serve(ln) }()
+
+	client := proxyClient(ln.Addr().String(), nil)
+	response := make(chan *http.Response, 1)
+	errs := make(chan error, 1)
+	go func() {
+		resp, err := client.Post(target.URL+"/paused", "text/plain", strings.NewReader("before"))
+		if err != nil {
+			errs <- err
+			return
+		}
+		response <- resp
+	}()
+
+	item := waitForIntercept(t, queue)
+	select {
+	case <-targetReached:
+		t.Fatal("upstream reached before intercept decision")
+	default:
+	}
+	if err := queue.Forward(item.ID, intercept.RequestEdit{
+		Method: item.Method, URL: item.URL, Headers: item.Headers, Body: []byte("after"),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case err := <-errs:
+		t.Fatal(err)
+	case resp := <-response:
+		defer resp.Body.Close()
+		body, _ := io.ReadAll(resp.Body)
+		if string(body) != "after" {
+			t.Fatalf("body = %q", body)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("forwarded request did not complete")
+	}
+}
+
+func TestHTTPSProxyInterceptBlocksUntilDrop(t *testing.T) {
+	var targetCalls atomic.Int32
+	target := httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		targetCalls.Add(1)
+	}))
+	defer target.Close()
+
+	authority, err := certs.LoadOrCreateAuthority(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	upstream := target.Client().Transport.(*http.Transport).Clone()
+	queue := intercept.NewQueue(2 * time.Second)
+	controller := intercept.NewController(queue, true, []intercept.Rule{{Enabled: true}})
+	srv := NewServer(Config{
+		Store: store.NewMemoryForTests(), BodyLimitBytes: 1024, Authority: authority,
+		Transport: upstream, Intercept: controller,
+	})
+	ln := listenForTest(t)
+	defer ln.Close()
+	go func() { _ = srv.Serve(ln) }()
+
+	client := proxyClient(ln.Addr().String(), authority)
+	response := make(chan *http.Response, 1)
+	errs := make(chan error, 1)
+	go func() {
+		resp, err := client.Get(strings.Replace(target.URL, "127.0.0.1", "localhost", 1) + "/drop")
+		if err != nil {
+			errs <- err
+			return
+		}
+		response <- resp
+	}()
+
+	item := waitForIntercept(t, queue)
+	if err := queue.Drop(item.ID); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-errs:
+		t.Fatal(err)
+	case resp := <-response:
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusForbidden {
+			t.Fatalf("status = %d", resp.StatusCode)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("dropped request did not complete")
+	}
+	if targetCalls.Load() != 0 {
+		t.Fatalf("target calls = %d", targetCalls.Load())
+	}
+}
+
+func TestHTTPSProxyHandlesMultipleRequestsOnOneTunnel(t *testing.T) {
+	target := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(r.URL.Path))
+	}))
+	defer target.Close()
+	authority, err := certs.LoadOrCreateAuthority(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	mem := &memoryStore{}
+	srv := NewServer(Config{
+		Store: mem, BodyLimitBytes: 1024, Authority: authority,
+		Transport: target.Client().Transport.(*http.Transport).Clone(),
+	})
+	rawListener := listenForTest(t)
+	ln := &countingListener{Listener: rawListener}
+	defer ln.Close()
+	go func() { _ = srv.Serve(ln) }()
+	client := proxyClient(ln.Addr().String(), authority)
+	baseURL := strings.Replace(target.URL, "127.0.0.1", "localhost", 1)
+	for _, path := range []string{"/one", "/two"} {
+		resp, err := client.Get(baseURL + path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+	}
+	waitForSavedExchanges(t, mem, 2)
+	if ln.accepted.Load() != 1 {
+		t.Fatalf("proxy connections = %d; expected one CONNECT tunnel", ln.accepted.Load())
+	}
+}
+
+func TestProxyStripsProxyAndHopByHopRequestHeaders(t *testing.T) {
+	received := make(chan http.Header, 1)
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		received <- r.Header.Clone()
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer target.Close()
+	srv := NewServer(Config{Store: store.NewMemoryForTests(), BodyLimitBytes: 1024})
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, target.URL, nil)
+	request.Header.Set("Proxy-Authorization", "Basic secret")
+	request.Header.Set("Connection", "X-Internal, keep-alive")
+	request.Header.Set("X-Internal", "secret")
+	request.Header.Set("Keep-Alive", "timeout=5")
+	srv.handleHTTP(recorder, request)
+
+	headers := <-received
+	for _, name := range []string{"Proxy-Authorization", "Connection", "X-Internal", "Keep-Alive"} {
+		if headers.Get(name) != "" {
+			t.Errorf("%s reached target: %q", name, headers.Get(name))
+		}
+	}
+}
+
+func TestProxyPersistsUpstreamFailures(t *testing.T) {
+	mem := &memoryStore{}
+	srv := NewServer(Config{
+		Store: mem, BodyLimitBytes: 1024,
+		Transport: roundTripperFunc(func(*http.Request) (*http.Response, error) {
+			return nil, errors.New("dns lookup failed")
+		}),
+	})
+	recorder := httptest.NewRecorder()
+	srv.handleHTTP(recorder, httptest.NewRequest(http.MethodGet, "http://missing.invalid/path", nil))
+	if recorder.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d", recorder.Code)
+	}
+	saved := waitForSavedExchanges(t, mem, 1)
+	if !saved[0].Error || !strings.Contains(saved[0].ErrorMessage, "dns lookup failed") {
+		t.Fatalf("saved exchange = %#v", saved)
 	}
 }
 
@@ -234,12 +417,94 @@ func mustParseURL(t *testing.T, rawURL string) *url.URL {
 	return parsed
 }
 
+func listenForTest(t *testing.T) net.Listener {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ln
+}
+
+func proxyClient(proxyAddr string, authority *certs.Authority) *http.Client {
+	transport := &http.Transport{Proxy: http.ProxyURL(mustParseURLWithoutTest("http://" + proxyAddr))}
+	if authority != nil {
+		roots := x509.NewCertPool()
+		roots.AppendCertsFromPEM(authority.CACertPEM())
+		transport.TLSClientConfig = &tls.Config{RootCAs: roots}
+	}
+	return &http.Client{Transport: transport, Timeout: 4 * time.Second}
+}
+
+func mustParseURLWithoutTest(rawURL string) *url.URL {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		panic(err)
+	}
+	return parsed
+}
+
+func waitForIntercept(t *testing.T, queue *intercept.Queue) intercept.Item {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if items := queue.List(); len(items) == 1 {
+			return items[0]
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("intercept item was not queued")
+	return intercept.Item{}
+}
+
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (fn roundTripperFunc) RoundTrip(request *http.Request) (*http.Response, error) {
+	return fn(request)
+}
+
+type countingListener struct {
+	net.Listener
+	accepted atomic.Int32
+}
+
+func (l *countingListener) Accept() (net.Conn, error) {
+	connection, err := l.Listener.Accept()
+	if err == nil {
+		l.accepted.Add(1)
+	}
+	return connection, err
+}
+
 type memoryStore struct {
+	mu    sync.Mutex
 	saved []*store.Exchange
 }
 
 func (s *memoryStore) SaveExchange(_ context.Context, exchange *store.Exchange) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.saved = append(s.saved, exchange)
+	return nil
+}
+
+func (s *memoryStore) snapshot() []*store.Exchange {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]*store.Exchange(nil), s.saved...)
+}
+
+func waitForSavedExchanges(t *testing.T, memory *memoryStore, count int) []*store.Exchange {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if saved := memory.snapshot(); len(saved) >= count {
+			return saved
+		}
+		time.Sleep(time.Millisecond)
+	}
+	saved := memory.snapshot()
+	t.Fatalf("saved exchanges = %d, want %d", len(saved), count)
 	return nil
 }
 

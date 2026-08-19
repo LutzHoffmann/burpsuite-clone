@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"net/http"
 	"path/filepath"
 	"testing"
 	"time"
@@ -114,5 +115,81 @@ func TestOpenSQLiteRecordsAppliedMigrations(t *testing.T) {
 	}
 	if count == 0 {
 		t.Fatal("expected at least one applied migration")
+	}
+}
+
+func TestSQLitePersistsRepeaterSessionAndSendHistory(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "project.sqlite")
+	st, err := OpenSQLite(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := &RepeaterSend{
+		SessionID: "session-1", Method: "POST", URL: "https://example.test/send",
+		RequestHeaders: http.Header{"Content-Type": {"text/plain"}}, RequestBody: "request",
+		Status: 202, ResponseHeaders: http.Header{"Content-Type": {"text/plain"}}, ResponseBody: "accepted",
+		DurationMS: 15, Size: 8, ContentType: "text/plain", SentAt: time.Unix(1700000000, 0).UTC(),
+	}
+	if err := st.SaveRepeaterSend(context.Background(), record); err != nil {
+		t.Fatal(err)
+	}
+	if record.ID == 0 {
+		t.Fatal("expected generated send id")
+	}
+	if err := st.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := OpenSQLite(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	sessions, err := reopened.ListRepeaterSessions(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sessions) != 1 || sessions[0].ID != "session-1" || sessions[0].SendCount != 1 {
+		t.Fatalf("sessions = %+v", sessions)
+	}
+	sends, err := reopened.ListRepeaterSends(context.Background(), "session-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sends) != 1 || sends[0].RequestBody != "request" || sends[0].ResponseBody != "accepted" {
+		t.Fatalf("sends = %+v", sends)
+	}
+}
+
+func TestSQLiteProvidesDefaultProjectAndPersistentSettings(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "project.sqlite")
+	st, err := OpenSQLite(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	project, err := st.ActiveProject(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if project.ID == 0 || project.Name != "Default Project" {
+		t.Fatalf("project = %+v", project)
+	}
+	if err := st.SetSetting(context.Background(), "intercept.enabled", "true"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := OpenSQLite(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	value, err := reopened.GetSetting(context.Background(), "intercept.enabled")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if value != "true" {
+		t.Fatalf("setting = %q", value)
 	}
 }

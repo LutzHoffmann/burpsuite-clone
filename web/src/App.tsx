@@ -1,6 +1,16 @@
 import { useEffect, useState } from 'react';
 import { Boxes, FileText, History, Network, Search, Send, SlidersHorizontal } from 'lucide-react';
-import { getHistory, getStatus } from './api/client';
+import {
+  dropIntercept as dropInterceptAPI,
+  forwardIntercept as forwardInterceptAPI,
+  getExchange,
+  getHistory,
+  getInterceptConfig,
+  getInterceptQueue,
+  getStatus,
+  sendRepeater as sendRepeaterAPI,
+  updateInterceptConfig,
+} from './api/client';
 import { connectEvents } from './api/events';
 import { HistoryTable } from './components/HistoryTable';
 import { InterceptPanel } from './components/InterceptPanel';
@@ -8,23 +18,7 @@ import { Inspector } from './components/Inspector';
 import { Repeater } from './components/Repeater';
 import { Settings } from './components/Settings';
 import { StatusBar } from './components/StatusBar';
-import type { Exchange, HistoryItem, InterceptItem, SendRequest, SendResult, StatusDTO } from './types';
-
-const historyItems: HistoryItem[] = [
-  { id: 1, method: 'GET', scheme: 'https', host: 'api.internal.test', path: '/v1/users', query: '', status: 200, mimeType: 'JSON', requestSize: 312, responseSize: 1843, durationMs: 42, startedAt: '2026-08-19T10:24:00', intercepted: false, error: false },
-  { id: 2, method: 'POST', scheme: 'https', host: 'accounts.test', path: '/session', query: '', status: 201, mimeType: 'JSON', requestSize: 492, responseSize: 823, durationMs: 118, startedAt: '2026-08-19T10:23:00', intercepted: false, error: false },
-  { id: 3, method: 'GET', scheme: 'https', host: 'cdn.internal.test', path: '/assets/app.js', query: '', status: 304, mimeType: 'JavaScript', requestSize: 185, responseSize: 0, durationMs: 12, startedAt: '2026-08-19T10:22:00', intercepted: false, error: false },
-  { id: 4, method: 'PUT', scheme: 'https', host: 'api.internal.test', path: '/v1/profile', query: '', status: 204, mimeType: 'JSON', requestSize: 746, responseSize: 0, durationMs: 76, startedAt: '2026-08-19T10:21:00', intercepted: false, error: false },
-];
-
-const exchanges: Record<number, Exchange> = Object.fromEntries(historyItems.map((item) => [item.id, {
-  ID: item.id, Method: item.method, Scheme: item.scheme, Host: item.host, Path: item.path, Query: item.query,
-  Status: item.status, MIMEType: item.mimeType, RequestSize: item.requestSize, ResponseSize: item.responseSize,
-  Duration: item.durationMs, StartedAt: item.startedAt, Intercepted: item.intercepted, Error: item.error,
-  ErrorMessage: '', RequestTruncated: false, ResponseTruncated: false,
-  Request: { Headers: { Host: [item.host], Accept: ['application/json'], Authorization: ['Bearer [redacted]'] }, Body: item.method === 'POST' || item.method === 'PUT' ? '{\n  "name": "operator"\n}' : '', Raw: `${item.method} ${item.path} HTTP/1.1\nHost: ${item.host}\nAccept: application/json` },
-  Response: { Headers: { 'Content-Type': ['application/json'] }, Body: '', Raw: `HTTP/1.1 ${item.status}` }, Tags: [], Note: '',
-}]));
+import type { Exchange, HistoryItem, InterceptConfig, InterceptItem, SendRequest, SendResult, StatusDTO } from './types';
 
 const fallbackStatus: StatusDTO = {
   apiAddr: '127.0.0.1:9080',
@@ -34,28 +28,41 @@ const fallbackStatus: StatusDTO = {
   httpsInterception: false,
 };
 
+const developmentFallback: HistoryItem[] = [{
+  id: 1, method: 'GET', scheme: 'https', host: 'api.example.test', path: '/v1/example', query: '',
+  status: 200, mimeType: 'application/json', requestSize: 128, responseSize: 512, durationMs: 42,
+  startedAt: '2026-08-19T10:24:00Z', intercepted: false, error: false,
+}];
+
+const emptyRepeaterRequest: SendRequest = { method: 'GET', url: '', headers: {}, body: '' };
+
 export function App() {
   const [status, setStatus] = useState<StatusDTO>(fallbackStatus);
-  const [items, setItems] = useState<HistoryItem[]>(historyItems);
-  const [selectedId, setSelectedId] = useState<number | null>(historyItems[0].id);
+  const [items, setItems] = useState<HistoryItem[]>([]);
+  const [selectedId, setSelectedId] = useState<number | null>(null);
+  const [exchange, setExchange] = useState<Exchange | null>(null);
   const [interceptItems, setInterceptItems] = useState<InterceptItem[]>([]);
+  const [interceptConfig, setInterceptConfig] = useState<InterceptConfig>({ enabled: false, rules: [] });
+  const [repeaterRequest, setRepeaterRequest] = useState<SendRequest>(emptyRepeaterRequest);
   const [repeaterResult, setRepeaterResult] = useState<SendResult | null>(null);
-  const [apiErrors, setAPIErrors] = useState<{ history?: string; status?: string }>({});
+  const [apiErrors, setAPIErrors] = useState<Record<string, string | undefined>>({});
   const [view, setView] = useState<'traffic' | 'settings'>('traffic');
-  const exchange = selectedId === null ? null : exchanges[selectedId] ?? null;
-  const repeaterRequest: SendRequest = { method: 'GET', url: 'https://api.internal.test/v1/users', headers: { Accept: ['application/json'] }, body: '' };
 
   useEffect(() => {
     let active = true;
+    const recordError = (key: string, label: string, error: unknown) => {
+      if (active) setAPIErrors((errors) => ({ ...errors, [key]: `${label}: ${error instanceof Error ? error.message : 'request failed'}` }));
+    };
+    const clearError = (key: string) => {
+      if (active) setAPIErrors((errors) => ({ ...errors, [key]: undefined }));
+    };
     const loadStatus = async () => {
       try {
         const nextStatus = await getStatus();
-        if (active) {
-          setStatus(nextStatus);
-          setAPIErrors((errors) => ({ ...errors, status: undefined }));
-        }
+        if (active) setStatus(nextStatus);
+        clearError('status');
       } catch (error) {
-        if (active) setAPIErrors((errors) => ({ ...errors, status: `Status unavailable: ${error instanceof Error ? error.message : 'request failed'}` }));
+        recordError('status', 'Status unavailable', error);
       }
     };
     const loadHistory = async () => {
@@ -64,29 +71,122 @@ export function App() {
         if (active) {
           setItems(nextHistory);
           setSelectedId((id) => nextHistory.some((item) => item.id === id) ? id : nextHistory[0]?.id ?? null);
-          setAPIErrors((errors) => ({ ...errors, history: undefined }));
         }
+        clearError('history');
       } catch (error) {
-        if (active) setAPIErrors((errors) => ({ ...errors, history: `History unavailable: ${error instanceof Error ? error.message : 'request failed'}` }));
+        if (active && import.meta.env.DEV) {
+          setItems(developmentFallback);
+          setSelectedId((id) => id ?? developmentFallback[0].id);
+        }
+        recordError('history', 'History unavailable', error);
+      }
+    };
+    const loadIntercept = async () => {
+      try {
+        const queue = await getInterceptQueue();
+        if (active) setInterceptItems(queue);
+        clearError('intercept');
+      } catch (error) {
+        recordError('intercept', 'Intercept unavailable', error);
+      }
+      try {
+        const config = await getInterceptConfig();
+        if (active) setInterceptConfig(config);
+      } catch (error) {
+        recordError('interceptConfig', 'Intercept setting unavailable', error);
       }
     };
 
     void loadStatus();
     void loadHistory();
+    void loadIntercept();
     const disconnect = connectEvents((event) => {
-      if (event.type === 'history.entry.created') void loadHistory();
+      if (event.type === 'history.entry.created' || event.type === 'history.entry.updated') void loadHistory();
       if (event.type === 'proxy.status.changed') void loadStatus();
+      if (event.type.startsWith('intercept.item.') || event.type === 'settings.changed') void loadIntercept();
     });
-
     return () => {
       active = false;
       disconnect();
     };
   }, []);
 
-  const forwardIntercept = (id: string) => setInterceptItems((items) => items.filter((item) => item.id !== id));
-  const dropIntercept = (id: string) => setInterceptItems((items) => items.filter((item) => item.id !== id));
-  const sendRepeater = (request: SendRequest) => setRepeaterResult({ status: 200, headers: { 'Content-Type': ['application/json'] }, body: request.body, durationMs: 0, size: new Blob([request.body]).size, truncated: false, contentType: 'application/json' });
+  useEffect(() => {
+    let active = true;
+    if (selectedId === null) {
+      setExchange(null);
+      return () => { active = false; };
+    }
+    setExchange(null);
+    void getExchange(selectedId).then((detail) => {
+      if (active) {
+        setExchange(detail);
+        setAPIErrors((errors) => ({ ...errors, detail: undefined }));
+      }
+    }).catch((error) => {
+      if (active) setAPIErrors((errors) => ({ ...errors, detail: `Detail unavailable: ${error instanceof Error ? error.message : 'request failed'}` }));
+    });
+    return () => { active = false; };
+  }, [selectedId]);
+
+  const loadInterceptQueue = async () => {
+    const queue = await getInterceptQueue();
+    setInterceptItems(queue);
+  };
+
+  const forwardIntercept = async (item: InterceptItem) => {
+    try {
+      await forwardInterceptAPI(item.id, item);
+      await loadInterceptQueue();
+    } catch (error) {
+      setAPIErrors((errors) => ({ ...errors, intercept: `Forward failed: ${error instanceof Error ? error.message : 'request failed'}` }));
+    }
+  };
+
+  const dropIntercept = async (id: string) => {
+    try {
+      await dropInterceptAPI(id);
+      await loadInterceptQueue();
+    } catch (error) {
+      setAPIErrors((errors) => ({ ...errors, intercept: `Drop failed: ${error instanceof Error ? error.message : 'request failed'}` }));
+    }
+  };
+
+  const toggleIntercept = async (enabled: boolean) => {
+    try {
+      const next = await updateInterceptConfig({ ...interceptConfig, enabled });
+      setInterceptConfig(next);
+    } catch (error) {
+      setAPIErrors((errors) => ({ ...errors, intercept: `Intercept setting failed: ${error instanceof Error ? error.message : 'request failed'}` }));
+    }
+  };
+
+  const sendHistoryToRepeater = async (id: number) => {
+    try {
+      const detail = exchange?.id === id ? exchange : await getExchange(id);
+      const query = detail.query ? `?${detail.query}` : '';
+      setRepeaterRequest({
+        method: detail.method,
+        url: `${detail.scheme}://${detail.host}${detail.path}${query}`,
+        headers: detail.request.headers,
+        body: detail.request.textSafe ? detail.request.body : '',
+      });
+      setRepeaterResult(null);
+      setAPIErrors((errors) => ({ ...errors, repeater: undefined }));
+    } catch (error) {
+      setAPIErrors((errors) => ({ ...errors, repeater: `Send to Repeater failed: ${error instanceof Error ? error.message : 'request failed'}` }));
+    }
+  };
+
+  const sendRepeater = async (request: SendRequest) => {
+    try {
+      const result = await sendRepeaterAPI('default', request);
+      setRepeaterResult(result);
+      setAPIErrors((errors) => ({ ...errors, repeater: undefined }));
+    } catch (error) {
+      setAPIErrors((errors) => ({ ...errors, repeater: `Repeater send failed: ${error instanceof Error ? error.message : 'request failed'}` }));
+    }
+  };
 
   return (
     <main className="app-shell">
@@ -107,7 +207,7 @@ export function App() {
             <button className="icon-button" aria-label="Filter history" type="button"><SlidersHorizontal size={16} /></button>
           </div>
           <label className="search"><Search size={15} /><input placeholder="Filter requests" /></label>
-          <HistoryTable items={items} selectedId={selectedId} onSelect={setSelectedId} onSendToRepeater={() => undefined} />
+          <HistoryTable items={items} selectedId={selectedId} onSelect={setSelectedId} onSendToRepeater={(id) => void sendHistoryToRepeater(id)} />
         </section>
 
         <section className="inspector-panel" aria-label="Exchange inspector">
@@ -118,18 +218,24 @@ export function App() {
           {view === 'settings' ? <Settings status={status} /> : <>
             <div className="utility-heading"><FileText size={16} /> Details</div>
             <dl>
-              <div><dt>Result</dt><dd className="ok">{exchange ? `${exchange.Status} OK` : '-'}</dd></div>
-              <div><dt>Content-Type</dt><dd>{exchange?.MIMEType ?? '-'}</dd></div>
-              <div><dt>Duration</dt><dd>{exchange ? `${exchange.Duration} ms` : '-'}</dd></div>
-              <div><dt>Response</dt><dd>{exchange ? `${(exchange.ResponseSize / 1024).toFixed(1)} kB` : '-'}</dd></div>
+              <div><dt>Result</dt><dd className={exchange?.error ? 'error' : 'ok'}>{exchange ? (exchange.error ? 'ERR' : exchange.status) : '-'}</dd></div>
+              <div><dt>Content-Type</dt><dd>{exchange?.mimeType ?? '-'}</dd></div>
+              <div><dt>Duration</dt><dd>{exchange ? `${exchange.durationMs} ms` : '-'}</dd></div>
+              <div><dt>Response</dt><dd>{exchange ? `${(exchange.responseSize / 1024).toFixed(1)} kB` : '-'}</dd></div>
             </dl>
           </>}
         </aside>
 
         <section className="repeater-workspace">
           {Object.values(apiErrors).filter(Boolean).length > 0 && <div className="api-error" role="status">{Object.values(apiErrors).filter(Boolean).join(' ')}</div>}
-          <InterceptPanel items={interceptItems} onForward={forwardIntercept} onDrop={dropIntercept} />
-          <Repeater initialRequest={repeaterRequest} result={repeaterResult} onSend={sendRepeater} />
+          <InterceptPanel
+            enabled={interceptConfig.enabled}
+            items={interceptItems}
+            onEnabledChange={(enabled) => void toggleIntercept(enabled)}
+            onForward={(item) => void forwardIntercept(item)}
+            onDrop={(id) => void dropIntercept(id)}
+          />
+          <Repeater initialRequest={repeaterRequest} result={repeaterResult} onSend={(request) => void sendRepeater(request)} />
         </section>
       </div>
     </main>
