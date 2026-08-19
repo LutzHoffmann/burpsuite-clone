@@ -14,19 +14,16 @@ function formatHeaders(headers: Record<string, string[]>) {
 
 export function Inspector({ exchange }: InspectorProps) {
   const [activeTab, setActiveTab] = useState<Tab>('Headers');
-
-  if (!exchange) {
-    return <div className="inspector-empty">Select a request to inspect its exchange.</div>;
-  }
-
-  const content: Record<Tab, string> = {
-    Headers: formatHeaders(exchange.Request.Headers),
-    Body: exchange.Request.Body || 'Request has no body.',
-    Raw: exchange.Request.Raw,
-    Cookies: exchange.Request.Headers.Cookie?.join('\n') || 'No request cookies.',
-    Query: exchange.Query || 'No query parameters.',
-    Timing: `Started: ${new Date(exchange.StartedAt).toLocaleTimeString()}\nDuration: ${exchange.Duration} ms`,
-  };
+  const content: Record<Tab, string> | null = exchange
+    ? {
+        Headers: formatHeaders(exchange.Request.Headers),
+        Body: exchange.Request.Body || 'Request has no body.',
+        Raw: exchange.Request.Raw,
+        Cookies: exchange.Request.Headers.Cookie?.join('\n') || 'No request cookies.',
+        Query: exchange.Query || 'No query parameters.',
+        Timing: `Started: ${new Date(exchange.StartedAt).toLocaleTimeString()}\nDuration: ${exchange.Duration} ms`,
+      }
+    : null;
 
   return (
     <>
@@ -37,8 +34,12 @@ export function Inspector({ exchange }: InspectorProps) {
           </button>
         ))}
       </div>
-      <div className="inspector-meta"><span>{exchange.Method} {exchange.Scheme}://{exchange.Host}{exchange.Path}</span></div>
-      <pre className="code-view" role="tabpanel"><code>{content[activeTab]}</code></pre>
+      {exchange && <div className="inspector-meta"><span>{exchange.Method} {exchange.Scheme}://{exchange.Host}{exchange.Path}</span></div>}
+      {content ? (
+        <pre className="code-view" role="tabpanel"><code>{content[activeTab]}</code></pre>
+      ) : (
+        <div className="inspector-empty" role="tabpanel">Select a request to inspect its exchange.</div>
+      )}
     </>
   );
 }
