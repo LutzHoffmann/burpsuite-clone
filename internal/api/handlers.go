@@ -16,11 +16,21 @@ import (
 var websocketUpgrader = websocket.Upgrader{}
 
 func (s *Server) handleStatus(w http.ResponseWriter, _ *http.Request) {
+	caFingerprint := ""
+	caTrust := "unavailable"
+	httpsInterception := false
+	if s.cfg.Authority != nil {
+		caFingerprint = s.cfg.Authority.FingerprintSHA256()
+		caTrust = "manual"
+		httpsInterception = true
+	}
+
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"apiAddr":           s.cfg.APIAddr,
 		"proxyAddr":         s.cfg.ProxyAddr,
-		"caFingerprint":     s.cfg.Authority.FingerprintSHA256(),
-		"httpsInterception": true,
+		"caFingerprint":     caFingerprint,
+		"caTrust":           caTrust,
+		"httpsInterception": httpsInterception,
 	})
 }
 

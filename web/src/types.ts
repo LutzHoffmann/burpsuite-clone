@@ -2,6 +2,7 @@ export interface StatusDTO {
   apiAddr: string;
   proxyAddr: string;
   caFingerprint: string;
+  caTrust: 'manual' | 'unavailable';
   httpsInterception: boolean;
 }
 

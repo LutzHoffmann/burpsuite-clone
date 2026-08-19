@@ -30,6 +30,7 @@ const fallbackStatus: StatusDTO = {
   apiAddr: '127.0.0.1:9080',
   proxyAddr: '127.0.0.1:8080',
   caFingerprint: '',
+  caTrust: 'unavailable',
   httpsInterception: false,
 };
 

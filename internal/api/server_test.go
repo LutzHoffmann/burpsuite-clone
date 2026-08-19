@@ -51,6 +51,42 @@ func TestStatusAndCADownload(t *testing.T) {
 	_ = resp.Body.Close()
 }
 
+func TestStatusWithoutAuthorityDisablesHTTPSInterception(t *testing.T) {
+	srv := NewServer(Config{
+		APIAddr:   "127.0.0.1:9080",
+		ProxyAddr: "127.0.0.1:8080",
+	})
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/api/status")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status code = %d", resp.StatusCode)
+	}
+
+	var status struct {
+		CAFingerprint     string `json:"caFingerprint"`
+		CATrust           string `json:"caTrust"`
+		HTTPSInterception bool   `json:"httpsInterception"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&status); err != nil {
+		t.Fatal(err)
+	}
+	if status.CAFingerprint != "" {
+		t.Fatalf("ca fingerprint = %q", status.CAFingerprint)
+	}
+	if status.CATrust != "unavailable" {
+		t.Fatalf("ca trust = %q", status.CATrust)
+	}
+	if status.HTTPSInterception {
+		t.Fatal("https interception is enabled without an authority")
+	}
+}
+
 func TestRepeaterSend(t *testing.T) {
 	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {

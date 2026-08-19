@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react';
+import { fireEvent, render, screen } from '@testing-library/react';
 import '@testing-library/jest-dom/vitest';
 import { App } from './App';
 import { Inspector } from './components/Inspector';
@@ -18,6 +18,7 @@ test('loads status from api', async () => {
         apiAddr: '127.0.0.1:9080',
         proxyAddr: '127.0.0.1:18080',
         caFingerprint: 'AA:BB',
+        caTrust: 'manual',
         httpsInterception: true,
       }), { status: 200, headers: { 'Content-Type': 'application/json' } });
     }
@@ -28,6 +29,9 @@ test('loads status from api', async () => {
   }));
   render(<App />);
   expect(await screen.findByText('127.0.0.1:18080')).toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
+  expect(screen.getByText('Manual setup required')).toBeInTheDocument();
+  expect(screen.getByText(/install and trust the local ca certificate/i)).toBeInTheDocument();
 });
 
 test('renders operator shell status', () => {
