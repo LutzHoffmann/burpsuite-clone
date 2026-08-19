@@ -11,6 +11,7 @@ coverage/
 *.key
 *.crt
 .burpsuite-clone/
+captures/
 projects/
 web/node_modules/
 web/dist/
