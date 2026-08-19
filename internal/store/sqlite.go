@@ -23,9 +23,9 @@ func OpenSQLite(path string) (*SQLiteStore, error) {
 		return nil, fmt.Errorf("open sqlite database: %w", err)
 	}
 
-	if _, err := db.Exec(schemaSQL); err != nil {
+	if err := applyMigrations(db); err != nil {
 		_ = db.Close()
-		return nil, fmt.Errorf("apply sqlite schema: %w", err)
+		return nil, fmt.Errorf("apply sqlite migrations: %w", err)
 	}
 
 	return &SQLiteStore{db: db, bodyLimitBytes: config.Load().BodyLimitBytes}, nil
@@ -45,10 +45,12 @@ func (s *SQLiteStore) SaveExchange(ctx context.Context, exchange *Exchange) erro
 		return fmt.Errorf("marshal tags: %w", err)
 	}
 
-	requestBody, requestTruncated := s.capBody(exchange.Request.Body)
-	responseBody, responseTruncated := s.capBody(exchange.Response.Body)
-	exchange.RequestTruncated = exchange.RequestTruncated || requestTruncated
-	exchange.ResponseTruncated = exchange.ResponseTruncated || responseTruncated
+	requestBody, requestBodyTruncated := s.capBody(exchange.Request.Body)
+	requestRaw, requestRawTruncated := s.capBody(exchange.Request.Raw)
+	responseBody, responseBodyTruncated := s.capBody(exchange.Response.Body)
+	responseRaw, responseRawTruncated := s.capBody(exchange.Response.Raw)
+	exchange.RequestTruncated = exchange.RequestTruncated || requestBodyTruncated || requestRawTruncated
+	exchange.ResponseTruncated = exchange.ResponseTruncated || responseBodyTruncated || responseRawTruncated
 
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -81,8 +83,8 @@ func (s *SQLiteStore) SaveExchange(ctx context.Context, exchange *Exchange) erro
 			exchange_id, request_headers_json, request_body, request_raw,
 			response_headers_json, response_body, response_raw
 		) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		id, requestHeaders, requestBody, exchange.Request.Raw,
-		responseHeaders, responseBody, exchange.Response.Raw,
+		id, requestHeaders, requestBody, requestRaw,
+		responseHeaders, responseBody, responseRaw,
 	); err != nil {
 		return fmt.Errorf("insert exchange bodies: %w", err)
 	}
