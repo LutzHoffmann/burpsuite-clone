@@ -1,9 +1,11 @@
 import { useState } from 'react';
-import { ArrowRight, Boxes, FileText, History, Network, Search, Send, SlidersHorizontal } from 'lucide-react';
+import { Boxes, FileText, History, Network, Search, Send, SlidersHorizontal } from 'lucide-react';
 import { HistoryTable } from './components/HistoryTable';
+import { InterceptPanel } from './components/InterceptPanel';
 import { Inspector } from './components/Inspector';
+import { Repeater } from './components/Repeater';
 import { StatusBar } from './components/StatusBar';
-import type { Exchange, HistoryItem } from './types';
+import type { Exchange, HistoryItem, InterceptItem, SendRequest, SendResult } from './types';
 
 const historyItems: HistoryItem[] = [
   { id: 1, method: 'GET', scheme: 'https', host: 'api.internal.test', path: '/v1/users', query: '', status: 200, mimeType: 'JSON', requestSize: 312, responseSize: 1843, durationMs: 42, startedAt: '2026-08-19T10:24:00', intercepted: false, error: false },
@@ -23,7 +25,14 @@ const exchanges: Record<number, Exchange> = Object.fromEntries(historyItems.map(
 
 export function App() {
   const [selectedId, setSelectedId] = useState<number | null>(historyItems[0].id);
+  const [interceptItems, setInterceptItems] = useState<InterceptItem[]>([]);
+  const [repeaterResult, setRepeaterResult] = useState<SendResult | null>(null);
   const exchange = selectedId === null ? null : exchanges[selectedId] ?? null;
+  const repeaterRequest: SendRequest = { method: 'GET', url: 'https://api.internal.test/v1/users', headers: { Accept: ['application/json'] }, body: '' };
+
+  const forwardIntercept = (id: string) => setInterceptItems((items) => items.filter((item) => item.id !== id));
+  const dropIntercept = (id: string) => setInterceptItems((items) => items.filter((item) => item.id !== id));
+  const sendRepeater = (request: SendRequest) => setRepeaterResult({ status: 200, headers: { 'Content-Type': ['application/json'] }, body: request.body, durationMs: 0, size: new Blob([request.body]).size, truncated: false, contentType: 'application/json' });
 
   return (
     <main className="app-shell">
@@ -59,9 +68,12 @@ export function App() {
             <div><dt>Duration</dt><dd>{exchange ? `${exchange.Duration} ms` : '-'}</dd></div>
             <div><dt>Response</dt><dd>{exchange ? `${(exchange.ResponseSize / 1024).toFixed(1)} kB` : '-'}</dd></div>
           </dl>
-          <div className="utility-heading queue-title"><ArrowRight size={16} /> Intercept queue <span>0</span></div>
-          <p className="empty-state">No requests are waiting for action.</p>
+          <InterceptPanel items={interceptItems} onForward={forwardIntercept} onDrop={dropIntercept} />
         </aside>
+
+        <section className="repeater-workspace">
+          <Repeater initialRequest={repeaterRequest} result={repeaterResult} onSend={sendRepeater} />
+        </section>
       </div>
     </main>
   );

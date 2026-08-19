@@ -30,3 +30,12 @@ test('keeps inspector tabs available when no exchange is selected', () => {
   expect(screen.getByRole('tab', { name: 'Timing' })).toBeInTheDocument();
   expect(screen.getByText('Select a request to inspect its exchange.')).toBeInTheDocument();
 });
+
+test('shows intercept and repeater controls', () => {
+  render(<App />);
+  expect(screen.getByText('Intercept Queue')).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Forward' })).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Drop' })).toBeInTheDocument();
+  expect(screen.getByText('Request Editor')).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Send' })).toBeInTheDocument();
+});
