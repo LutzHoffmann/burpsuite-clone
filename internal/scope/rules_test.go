@@ -18,9 +18,13 @@ func TestRuleSetClassifyRejectsMalformedBracketedHost(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	decision := rules.Classify(Target{Scheme: "https", Host: "[example.test]", Path: "/"})
-	if decision.InScope || decision.Reason != "no_include" {
-		t.Fatalf("malformed host decision = %#v", decision)
+	for _, host := range []string{"[example.test]", "[example.test]:443"} {
+		t.Run(host, func(t *testing.T) {
+			decision := rules.Classify(Target{Scheme: "https", Host: host, Path: "/"})
+			if decision.InScope || decision.Reason != "no_include" {
+				t.Fatalf("malformed host decision = %#v", decision)
+			}
+		})
 	}
 }
 

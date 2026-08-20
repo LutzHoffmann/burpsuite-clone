@@ -172,6 +172,9 @@ func normalizeTarget(target Target) (normalizedTarget, bool) {
 func splitHostPort(value, scheme string) (string, int, error) {
 	host, portText, err := net.SplitHostPort(value)
 	if err == nil {
+		if strings.HasPrefix(value, "[") && net.ParseIP(host) == nil {
+			return "", 0, fmt.Errorf("invalid bracketed host %q", value)
+		}
 		port, err := strconv.Atoi(portText)
 		if err != nil || port < 1 || port > 65535 {
 			return "", 0, fmt.Errorf("invalid port %q", portText)
