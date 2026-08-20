@@ -70,6 +70,11 @@ type TargetObservation struct {
 	ParseDiagnostic string
 }
 
+type RebuildStatus struct {
+	ID, ScopeVersion, ActiveScopeVersion, Processed, Total int64
+	Status, Error                                          string
+}
+
 type HistoryItem struct {
 	ID           int64     `json:"id"`
 	Method       string    `json:"method"`
