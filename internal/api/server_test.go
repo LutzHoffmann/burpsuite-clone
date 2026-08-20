@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -16,7 +17,9 @@ import (
 	"github.com/lutzifer/burpsuite-clone/internal/events"
 	"github.com/lutzifer/burpsuite-clone/internal/intercept"
 	"github.com/lutzifer/burpsuite-clone/internal/repeater"
+	"github.com/lutzifer/burpsuite-clone/internal/scope"
 	"github.com/lutzifer/burpsuite-clone/internal/store"
+	"github.com/lutzifer/burpsuite-clone/internal/target"
 )
 
 func TestStatusAndCADownload(t *testing.T) {
@@ -461,6 +464,384 @@ func TestRepeaterSendHistoryIsExposedByAPI(t *testing.T) {
 	if len(sends) != 1 || sends[0].Status != http.StatusAccepted || sends[0].ResponseBody != "persisted response" {
 		t.Fatalf("sends = %+v", sends)
 	}
+}
+
+func TestAPIScopeRulesStartEmpty(t *testing.T) {
+	srv, _ := newTargetAPIServer(t)
+	recorder := serveAPIRequest(srv, http.MethodGet, "/api/scope/rules", "", "")
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %q", recorder.Code, recorder.Body.String())
+	}
+	if strings.TrimSpace(recorder.Body.String()) != `{"version":0,"rules":[]}` {
+		t.Fatalf("body = %q", recorder.Body.String())
+	}
+}
+
+func TestAPIReplacesScopeRulesAndReturnsAssignedIDs(t *testing.T) {
+	srv, service := newTargetAPIServer(t)
+	body := `{"version":0,"rules":[{"id":0,"enabled":true,"action":"include","scheme":"https","hostPattern":"example.test","port":0,"pathPrefix":"/api"}]}`
+	recorder := serveAPIRequest(srv, http.MethodPut, "/api/scope/rules", body, "application/json")
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %q", recorder.Code, recorder.Body.String())
+	}
+	var state scope.State
+	if err := json.NewDecoder(recorder.Body).Decode(&state); err != nil {
+		t.Fatal(err)
+	}
+	if state.Version != 1 || len(state.Rules) != 1 || state.Rules[0].ID == 0 {
+		t.Fatalf("state = %#v", state)
+	}
+	waitForServiceRebuild(t, service)
+}
+
+func TestAPIScopeUpdateRejectsStaleAndInvalidRules(t *testing.T) {
+	srv, service := newTargetAPIServer(t)
+	valid := `{"version":0,"rules":[{"id":0,"enabled":true,"action":"include","scheme":"https","hostPattern":"example.test","port":0,"pathPrefix":"/"}]}`
+	if recorder := serveAPIRequest(srv, http.MethodPut, "/api/scope/rules", valid, "application/json"); recorder.Code != http.StatusOK {
+		t.Fatalf("initial status = %d, body = %q", recorder.Code, recorder.Body.String())
+	}
+	waitForServiceRebuild(t, service)
+
+	stale := serveAPIRequest(srv, http.MethodPut, "/api/scope/rules", valid, "application/json")
+	if stale.Code != http.StatusConflict {
+		t.Fatalf("stale status = %d, body = %q", stale.Code, stale.Body.String())
+	}
+	invalid := `{"version":1,"rules":[{"id":0,"enabled":true,"action":"include","scheme":"ftp","hostPattern":"example.test","port":0,"pathPrefix":"/"}]}`
+	badRule := serveAPIRequest(srv, http.MethodPut, "/api/scope/rules", invalid, "application/json")
+	if badRule.Code != http.StatusBadRequest {
+		t.Fatalf("invalid status = %d, body = %q", badRule.Code, badRule.Body.String())
+	}
+}
+
+func TestAPIScopeUpdateRetainsJSONWriteProtections(t *testing.T) {
+	tests := []struct {
+		name, body, contentType, origin string
+		maxBytes                        int64
+		want                            int
+	}{
+		{name: "cross origin", body: `{}`, contentType: "application/json", origin: "https://attacker.example", want: http.StatusForbidden},
+		{name: "wrong content type", body: `{}`, contentType: "text/plain", want: http.StatusUnsupportedMediaType},
+		{name: "oversized", body: `{"version":0,"rules":[]}`, contentType: "application/json", maxBytes: 8, want: http.StatusRequestEntityTooLarge},
+		{name: "unknown field", body: `{"version":0,"rules":[],"extra":true}`, contentType: "application/json", want: http.StatusBadRequest},
+		{name: "trailing data", body: `{"version":0,"rules":[]} {}`, contentType: "application/json", want: http.StatusBadRequest},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			srv, _ := newTargetAPIServer(t)
+			if test.maxBytes > 0 {
+				srv.cfg.MaxBodyBytes = test.maxBytes
+			}
+			recorder := serveAPIRequestWithOrigin(srv, http.MethodPut, "/api/scope/rules", test.body, test.contentType, test.origin)
+			if recorder.Code != test.want {
+				t.Fatalf("status = %d, want %d, body = %q", recorder.Code, test.want, recorder.Body.String())
+			}
+		})
+	}
+}
+
+func TestAPITargetRoutesRequireService(t *testing.T) {
+	srv := NewServer(Config{APIAddr: "127.0.0.1:9080"})
+	for _, path := range []string{"/api/scope/rules", "/api/target/tree", "/api/target/rebuild"} {
+		recorder := serveAPIRequest(srv, http.MethodGet, path, "", "")
+		if recorder.Code != http.StatusServiceUnavailable {
+			t.Fatalf("path %s status = %d, body = %q", path, recorder.Code, recorder.Body.String())
+		}
+	}
+}
+
+func TestAPITargetTreeIsOrderedAndUsesExplicitDTOs(t *testing.T) {
+	srv, service := newTargetAPIServer(t)
+	historyStore := srv.cfg.Store
+	for _, exchange := range []*store.Exchange{
+		{
+			Method: "POST", Scheme: "https", Host: "z.example.test", Path: "/api/users", Status: 201,
+			MIMEType: "application/json", StartedAt: time.Unix(1700000002, 0).UTC(),
+			Request:  store.RequestData{Headers: http.Header{"Content-Type": {"application/json"}}, Body: []byte(`{"username":"secret"}`)},
+			Response: store.ResponseData{Headers: http.Header{"Content-Type": {"application/json"}}, Body: []byte(`{"ok":true}`)},
+		},
+		{
+			Method: "GET", Scheme: "http", Host: "a.example.test", Path: "/", Status: 200,
+			MIMEType: "text/plain", StartedAt: time.Unix(1700000001, 0).UTC(),
+			Response: store.ResponseData{Headers: http.Header{"Content-Type": {"text/plain"}}, Body: []byte("ok")},
+		},
+	} {
+		if err := historyStore.SaveExchange(context.Background(), exchange); err != nil {
+			t.Fatal(err)
+		}
+	}
+	includeAll := `{"version":0,"rules":[{"id":0,"enabled":true,"action":"include","scheme":"","hostPattern":"*.example.test","port":0,"pathPrefix":"/"}]}`
+	if recorder := serveAPIRequest(srv, http.MethodPut, "/api/scope/rules", includeAll, "application/json"); recorder.Code != http.StatusOK {
+		t.Fatalf("scope status = %d, body = %q", recorder.Code, recorder.Body.String())
+	}
+	waitForServiceRebuild(t, service)
+
+	recorder := serveAPIRequest(srv, http.MethodGet, "/api/target/tree", "", "")
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %q", recorder.Code, recorder.Body.String())
+	}
+	var tree []struct {
+		ID            int64             `json:"id"`
+		Scheme        string            `json:"scheme"`
+		Host          string            `json:"host"`
+		InScope       bool              `json:"inScope"`
+		RequestMIMEs  []string          `json:"requestMimes"`
+		ResponseMIMEs []string          `json:"responseMimes"`
+		Children      []json.RawMessage `json:"children"`
+	}
+	if err := json.NewDecoder(recorder.Body).Decode(&tree); err != nil {
+		t.Fatal(err)
+	}
+	if len(tree) != 2 || tree[0].Scheme != "http" || tree[0].Host != "a.example.test" || tree[1].Host != "z.example.test" {
+		t.Fatalf("tree = %+v", tree)
+	}
+	if !tree[0].InScope || tree[0].Children == nil || tree[0].RequestMIMEs == nil || tree[0].ResponseMIMEs == nil {
+		t.Fatalf("tree DTO = %+v", tree[0])
+	}
+	if bytes.Contains(recorder.Body.Bytes(), []byte(`"RequestMIMEs"`)) {
+		t.Fatalf("storage field leaked: %s", recorder.Body.String())
+	}
+}
+
+func TestAPITargetTreeWithoutActiveGenerationIsEmpty(t *testing.T) {
+	repository, err := store.OpenSQLite(filepath.Join(t.TempDir(), "project.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = repository.Close() })
+	service := target.NewService(repository, scope.NewManager(nil), events.NewHub(), target.Limits{})
+	t.Cleanup(service.Close)
+	srv := NewServer(Config{Store: repository, Target: service, APIAddr: "127.0.0.1:9080"})
+	recorder := serveAPIRequest(srv, http.MethodGet, "/api/target/tree", "", "")
+	if recorder.Code != http.StatusOK || strings.TrimSpace(recorder.Body.String()) != "[]" {
+		t.Fatalf("status = %d, body = %q", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestAPITargetEndpointRequestsAndParametersAreProjected(t *testing.T) {
+	srv, service := newTargetAPIServer(t)
+	exchange := &store.Exchange{
+		Method: "POST", Scheme: "https", Host: "example.test", Path: "/api/users", Query: "page=7", Status: 201,
+		MIMEType: "application/json", StartedAt: time.Unix(1700000000, 0).UTC(),
+		Request:  store.RequestData{Headers: http.Header{"Content-Type": {"application/json"}}, Body: []byte(`{"username":"secret"}`)},
+		Response: store.ResponseData{Headers: http.Header{"Content-Type": {"application/json"}}, Body: []byte(`{"token":"never expose"}`)},
+	}
+	if err := srv.cfg.Store.SaveExchange(context.Background(), exchange); err != nil {
+		t.Fatal(err)
+	}
+	body := `{"version":0,"rules":[{"id":0,"enabled":true,"action":"include","scheme":"https","hostPattern":"example.test","port":0,"pathPrefix":"/api"}]}`
+	if recorder := serveAPIRequest(srv, http.MethodPut, "/api/scope/rules", body, "application/json"); recorder.Code != http.StatusOK {
+		t.Fatalf("scope status = %d, body = %q", recorder.Code, recorder.Body.String())
+	}
+	waitForServiceRebuild(t, service)
+
+	treeRecorder := serveAPIRequest(srv, http.MethodGet, "/api/target/tree", "", "")
+	endpointID := endpointIDFromTree(t, treeRecorder.Body.Bytes())
+	endpoint := serveAPIRequest(srv, http.MethodGet, "/api/target/endpoints/"+strconv.FormatInt(endpointID, 10), "", "")
+	if endpoint.Code != http.StatusOK || !bytes.Contains(endpoint.Body.Bytes(), []byte(`"latestExchangeId":1`)) {
+		t.Fatalf("endpoint status = %d, body = %q", endpoint.Code, endpoint.Body.String())
+	}
+	requests := serveAPIRequest(srv, http.MethodGet, "/api/target/endpoints/"+strconv.FormatInt(endpointID, 10)+"/requests", "", "")
+	if requests.Code != http.StatusOK || !bytes.Contains(requests.Body.Bytes(), []byte(`"exchangeId":1`)) {
+		t.Fatalf("requests status = %d, body = %q", requests.Code, requests.Body.String())
+	}
+	parameters := serveAPIRequest(srv, http.MethodGet, "/api/target/endpoints/"+strconv.FormatInt(endpointID, 10)+"/parameters", "", "")
+	if parameters.Code != http.StatusOK || !bytes.Contains(parameters.Body.Bytes(), []byte(`"name":"username"`)) {
+		t.Fatalf("parameters status = %d, body = %q", parameters.Code, parameters.Body.String())
+	}
+	if bytes.Contains(parameters.Body.Bytes(), []byte("secret")) || bytes.Contains(parameters.Body.Bytes(), []byte(`"value"`)) {
+		t.Fatalf("parameter values leaked: %s", parameters.Body.String())
+	}
+}
+
+func TestAPITargetEndpointRoutesRejectInvalidAndUnknownIDs(t *testing.T) {
+	srv, _ := newTargetAPIServer(t)
+	for _, test := range []struct {
+		path string
+		want int
+	}{
+		{path: "/api/target/endpoints/not-a-number", want: http.StatusBadRequest},
+		{path: "/api/target/endpoints/999", want: http.StatusNotFound},
+		{path: "/api/target/endpoints/999/requests", want: http.StatusNotFound},
+		{path: "/api/target/endpoints/999/parameters", want: http.StatusNotFound},
+	} {
+		recorder := serveAPIRequest(srv, http.MethodGet, test.path, "", "")
+		if recorder.Code != test.want {
+			t.Fatalf("path %s status = %d, want %d, body = %q", test.path, recorder.Code, test.want, recorder.Body.String())
+		}
+	}
+}
+
+func TestAPIRebuildStatusAndRetryContract(t *testing.T) {
+	srv, service := newTargetAPIServer(t)
+	for index := 0; index < 250; index++ {
+		exchange := &store.Exchange{
+			Method: "GET", Scheme: "https", Host: "example.test", Path: "/items", Status: http.StatusOK,
+			StartedAt: time.Unix(1700000000+int64(index), 0).UTC(),
+			Response:  store.ResponseData{Headers: http.Header{"Content-Type": {"application/json"}}, Body: []byte(`{"ok":true}`)},
+		}
+		if err := srv.cfg.Store.SaveExchange(context.Background(), exchange); err != nil {
+			t.Fatal(err)
+		}
+	}
+	includeAll := `{"version":0,"rules":[{"id":0,"enabled":true,"action":"include","scheme":"https","hostPattern":"example.test","port":0,"pathPrefix":"/"}]}`
+	if recorder := serveAPIRequest(srv, http.MethodPut, "/api/scope/rules", includeAll, "application/json"); recorder.Code != http.StatusOK {
+		t.Fatalf("scope status = %d, body = %q", recorder.Code, recorder.Body.String())
+	}
+	waitForServiceRebuild(t, service)
+	status := serveAPIRequest(srv, http.MethodGet, "/api/target/rebuild", "", "")
+	if status.Code != http.StatusOK || !bytes.Contains(status.Body.Bytes(), []byte(`"status":"active"`)) {
+		t.Fatalf("status = %d, body = %q", status.Code, status.Body.String())
+	}
+	retry := serveAPIRequest(srv, http.MethodPost, "/api/target/rebuild", `{}`, "application/json")
+	if retry.Code != http.StatusAccepted || !bytes.Contains(retry.Body.Bytes(), []byte(`"status":"building"`)) {
+		t.Fatalf("retry status = %d, body = %q", retry.Code, retry.Body.String())
+	}
+	conflict := serveAPIRequest(srv, http.MethodPost, "/api/target/rebuild", `{}`, "application/json")
+	if conflict.Code != http.StatusConflict {
+		t.Fatalf("conflict status = %d, body = %q", conflict.Code, conflict.Body.String())
+	}
+	waitForServiceRebuild(t, service)
+}
+
+func TestAPIRebuildRetryAcceptsOnlyEmptyJSONObject(t *testing.T) {
+	for _, body := range []string{"", `null`, `[]`, `{"extra":true}`, `{} {}`} {
+		t.Run(body, func(t *testing.T) {
+			srv, service := newTargetAPIServer(t)
+			waitForServiceRebuild(t, service)
+			recorder := serveAPIRequest(srv, http.MethodPost, "/api/target/rebuild", body, "application/json")
+			if recorder.Code != http.StatusBadRequest {
+				t.Fatalf("body %q status = %d, response = %q", body, recorder.Code, recorder.Body.String())
+			}
+		})
+	}
+}
+
+func TestAPIHistoryResponsesExposeScopeClassification(t *testing.T) {
+	memory := store.NewMemoryForTests()
+	ruleID := int64(42)
+	for _, exchange := range []*store.Exchange{
+		{Method: "GET", Scheme: "https", Host: "in.test", Path: "/", StartedAt: time.Unix(2, 0).UTC(), InScope: true, ScopeVersion: 3, ScopeRuleID: &ruleID},
+		{Method: "GET", Scheme: "https", Host: "out.test", Path: "/", StartedAt: time.Unix(1, 0).UTC(), InScope: false, ScopeVersion: 3},
+	} {
+		if err := memory.SaveExchange(context.Background(), exchange); err != nil {
+			t.Fatal(err)
+		}
+	}
+	srv := NewServer(Config{Store: memory, APIAddr: "127.0.0.1:9080"})
+	list := serveAPIRequest(srv, http.MethodGet, "/api/history", "", "")
+	if list.Code != http.StatusOK || !bytes.Contains(list.Body.Bytes(), []byte(`"scopeRuleId":null`)) || !bytes.Contains(list.Body.Bytes(), []byte(`"scopeRuleId":42`)) {
+		t.Fatalf("list status = %d, body = %q", list.Code, list.Body.String())
+	}
+	detail := serveAPIRequest(srv, http.MethodGet, "/api/history/2", "", "")
+	if detail.Code != http.StatusOK || !bytes.Contains(detail.Body.Bytes(), []byte(`"inScope":false`)) || !bytes.Contains(detail.Body.Bytes(), []byte(`"scopeVersion":3`)) || !bytes.Contains(detail.Body.Bytes(), []byte(`"scopeRuleId":null`)) {
+		t.Fatalf("detail status = %d, body = %q", detail.Code, detail.Body.String())
+	}
+}
+
+func newTargetAPIServer(t *testing.T) (*Server, *target.Service) {
+	t.Helper()
+	repository, err := store.OpenSQLite(filepath.Join(t.TempDir(), "project.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, err := repository.LoadScopeState(context.Background())
+	if err != nil {
+		repository.Close()
+		t.Fatal(err)
+	}
+	rules, err := scope.Compile(state.Version, state.Rules)
+	if err != nil {
+		repository.Close()
+		t.Fatal(err)
+	}
+	service := target.NewService(repository, scope.NewManager(rules), events.NewHub(), target.Limits{
+		MaxJSONDepth: 16, MaxFields: 1000, MaxMultipartFields: 100,
+	})
+	if err := service.Recover(context.Background()); err != nil {
+		repository.Close()
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		service.Close()
+		_ = repository.Close()
+	})
+	srv := NewServer(Config{Store: repository, Target: service, APIAddr: "127.0.0.1:9080"})
+	waitForServiceRebuild(t, service)
+	return srv, service
+}
+
+func waitForServiceRebuild(t *testing.T, service *target.Service) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	var last store.RebuildStatus
+	for time.Now().Before(deadline) {
+		status, err := service.RebuildStatus(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		last = status
+		if status.Status == "active" {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("target rebuild did not become active: %+v", last)
+}
+
+func serveAPIRequest(srv *Server, method, path, body, contentType string) *httptest.ResponseRecorder {
+	return serveAPIRequestWithOrigin(srv, method, path, body, contentType, "")
+}
+
+func serveAPIRequestWithOrigin(srv *Server, method, path, body, contentType, origin string) *httptest.ResponseRecorder {
+	request := httptest.NewRequest(method, "http://127.0.0.1:9080"+path, strings.NewReader(body))
+	if contentType != "" {
+		request.Header.Set("Content-Type", contentType)
+	}
+	if origin != "" {
+		request.Header.Set("Origin", origin)
+	}
+	recorder := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(recorder, request)
+	return recorder
+}
+
+func endpointIDFromTree(t *testing.T, payload []byte) int64 {
+	t.Helper()
+	var tree []struct {
+		ID       int64             `json:"id"`
+		Children []json.RawMessage `json:"children"`
+	}
+	if err := json.Unmarshal(payload, &tree); err != nil {
+		t.Fatal(err)
+	}
+	var find func([]json.RawMessage) int64
+	find = func(nodes []json.RawMessage) int64 {
+		for _, raw := range nodes {
+			var node struct {
+				ID       int64             `json:"id"`
+				Children []json.RawMessage `json:"children"`
+			}
+			if err := json.Unmarshal(raw, &node); err != nil {
+				t.Fatal(err)
+			}
+			if node.ID != 0 {
+				return node.ID
+			}
+			if id := find(node.Children); id != 0 {
+				return id
+			}
+		}
+		return 0
+	}
+	rootNodes := make([]json.RawMessage, len(tree))
+	for index := range tree {
+		rootNodes[index], _ = json.Marshal(tree[index])
+	}
+	if id := find(rootNodes); id != 0 {
+		return id
+	}
+	t.Fatalf("endpoint id not found in tree: %s", payload)
+	return 0
 }
 
 func waitForAPIQueue(t *testing.T, queue *intercept.Queue) {

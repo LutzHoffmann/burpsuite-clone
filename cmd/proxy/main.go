@@ -98,6 +98,7 @@ func main() {
 		APIAddr:      cfg.APIAddr,
 		ProxyAddr:    cfg.ProxyAddr,
 		Intercept:    interceptController,
+		Target:       targetService,
 		MaxBodyBytes: cfg.BodyLimitBytes,
 	})
 	httpServer := &http.Server{

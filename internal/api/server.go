@@ -10,6 +10,7 @@ import (
 	"github.com/lutzifer/burpsuite-clone/internal/intercept"
 	"github.com/lutzifer/burpsuite-clone/internal/repeater"
 	"github.com/lutzifer/burpsuite-clone/internal/store"
+	"github.com/lutzifer/burpsuite-clone/internal/target"
 )
 
 type Config struct {
@@ -20,6 +21,7 @@ type Config struct {
 	APIAddr      string
 	ProxyAddr    string
 	Intercept    *intercept.Controller
+	Target       *target.Service
 	MaxBodyBytes int64
 }
 
@@ -51,6 +53,14 @@ func NewServer(cfg Config) *Server {
 	srv.mux.HandleFunc("GET /api/repeater/sessions/{id}/history", srv.handleRepeaterHistory)
 	srv.mux.HandleFunc("GET /api/repeater/sessions/{id}/compare", srv.handleRepeaterCompare)
 	srv.mux.HandleFunc("POST /api/repeater/sessions/{id}/send", srv.handleRepeaterSend)
+	srv.mux.HandleFunc("GET /api/scope/rules", srv.handleScopeRules)
+	srv.mux.HandleFunc("PUT /api/scope/rules", srv.handleScopeRulesUpdate)
+	srv.mux.HandleFunc("GET /api/target/tree", srv.handleTargetTree)
+	srv.mux.HandleFunc("GET /api/target/endpoints/{id}", srv.handleTargetEndpoint)
+	srv.mux.HandleFunc("GET /api/target/endpoints/{id}/requests", srv.handleTargetRequests)
+	srv.mux.HandleFunc("GET /api/target/endpoints/{id}/parameters", srv.handleTargetParameters)
+	srv.mux.HandleFunc("GET /api/target/rebuild", srv.handleTargetRebuild)
+	srv.mux.HandleFunc("POST /api/target/rebuild", srv.handleTargetRebuildRetry)
 	srv.mux.HandleFunc("GET /", srv.handleUI)
 	if cfg.Intercept != nil {
 		cfg.Intercept.Queue().SetObserver(func(change intercept.Change) {

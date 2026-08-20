@@ -47,10 +47,33 @@ type exchangeDTO struct {
 	ErrorMessage      string     `json:"errorMessage"`
 	RequestTruncated  bool       `json:"requestTruncated"`
 	ResponseTruncated bool       `json:"responseTruncated"`
+	InScope           bool       `json:"inScope"`
+	ScopeVersion      int64      `json:"scopeVersion"`
+	ScopeRuleID       *int64     `json:"scopeRuleId"`
 	Request           messageDTO `json:"request"`
 	Response          messageDTO `json:"response"`
 	Tags              []string   `json:"tags"`
 	Note              string     `json:"note"`
+}
+
+type historyItemDTO struct {
+	ID           int64     `json:"id"`
+	Method       string    `json:"method"`
+	Scheme       string    `json:"scheme"`
+	Host         string    `json:"host"`
+	Path         string    `json:"path"`
+	Query        string    `json:"query"`
+	Status       int       `json:"status"`
+	MIMEType     string    `json:"mimeType"`
+	RequestSize  int64     `json:"requestSize"`
+	ResponseSize int64     `json:"responseSize"`
+	DurationMS   int64     `json:"durationMs"`
+	StartedAt    time.Time `json:"startedAt"`
+	Intercepted  bool      `json:"intercepted"`
+	Error        bool      `json:"error"`
+	InScope      bool      `json:"inScope"`
+	ScopeVersion int64     `json:"scopeVersion"`
+	ScopeRuleID  *int64    `json:"scopeRuleId"`
 }
 
 type repeaterAPIRequest struct {
@@ -130,7 +153,11 @@ func (s *Server) handleHistory(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "list history", http.StatusInternalServerError)
 		return
 	}
-	writeJSON(w, http.StatusOK, history)
+	dtos := make([]historyItemDTO, len(history))
+	for index, item := range history {
+		dtos[index] = toHistoryItemDTO(item)
+	}
+	writeJSON(w, http.StatusOK, dtos)
 }
 
 func (s *Server) handleHistoryDetail(w http.ResponseWriter, r *http.Request) {
@@ -424,9 +451,19 @@ func toExchangeDTO(exchange *store.Exchange) exchangeDTO {
 		DurationMS: exchange.Duration.Milliseconds(), StartedAt: exchange.StartedAt,
 		Intercepted: exchange.Intercepted, Error: exchange.Error, ErrorMessage: exchange.ErrorMessage,
 		RequestTruncated: exchange.RequestTruncated, ResponseTruncated: exchange.ResponseTruncated,
+		InScope: exchange.InScope, ScopeVersion: exchange.ScopeVersion, ScopeRuleID: exchange.ScopeRuleID,
 		Request:  toMessageDTO(exchange.Request.Headers, exchange.Request.Body, exchange.Request.Raw, exchange.RequestTruncated),
 		Response: toMessageDTO(exchange.Response.Headers, exchange.Response.Body, exchange.Response.Raw, exchange.ResponseTruncated),
 		Tags:     exchange.Tags, Note: exchange.Note,
+	}
+}
+
+func toHistoryItemDTO(item store.HistoryItem) historyItemDTO {
+	return historyItemDTO{
+		ID: item.ID, Method: item.Method, Scheme: item.Scheme, Host: item.Host, Path: item.Path, Query: item.Query,
+		Status: item.Status, MIMEType: item.MIMEType, RequestSize: item.RequestSize, ResponseSize: item.ResponseSize,
+		DurationMS: item.DurationMS, StartedAt: item.StartedAt, Intercepted: item.Intercepted, Error: item.Error,
+		InScope: item.InScope, ScopeVersion: item.ScopeVersion, ScopeRuleID: item.ScopeRuleID,
 	}
 }
 
