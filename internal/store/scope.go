@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 
@@ -11,12 +12,23 @@ import (
 var ErrScopeVersionConflict = errors.New("scope version conflict")
 
 func (s *SQLiteStore) LoadScopeState(ctx context.Context) (scope.State, error) {
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return scope.State{}, fmt.Errorf("begin scope read transaction: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+
 	var state scope.State
-	if err := s.db.QueryRowContext(ctx, `SELECT version FROM scope_state WHERE project_id = 1`).Scan(&state.Version); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT version FROM scope_state WHERE project_id = 1`).Scan(&state.Version); err != nil {
 		return scope.State{}, fmt.Errorf("load scope version: %w", err)
 	}
 
-	rows, err := s.db.QueryContext(ctx, `
+	rows, err := tx.QueryContext(ctx, `
 		SELECT id, enabled, action, scheme, host_pattern, port, path_prefix
 		FROM scope_rules
 		WHERE project_id = 1
@@ -39,6 +51,13 @@ func (s *SQLiteStore) LoadScopeState(ctx context.Context) (scope.State, error) {
 	if err := rows.Err(); err != nil {
 		return scope.State{}, fmt.Errorf("iterate scope rules: %w", err)
 	}
+	if err := rows.Close(); err != nil {
+		return scope.State{}, fmt.Errorf("close scope rules: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return scope.State{}, fmt.Errorf("commit scope read transaction: %w", err)
+	}
+	committed = true
 	return state, nil
 }
 

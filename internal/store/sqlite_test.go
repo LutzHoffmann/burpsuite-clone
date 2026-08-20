@@ -3,14 +3,18 @@ package store
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"errors"
+	"fmt"
 	"net/http"
 	"path/filepath"
 	"slices"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/lutzifer/burpsuite-clone/internal/scope"
+	modernsqlite "modernc.org/sqlite"
 )
 
 func openTestStore(t *testing.T) *SQLiteStore {
@@ -116,6 +120,133 @@ func TestSQLiteScopeRulesReplaceAtomically(t *testing.T) {
 	if err != nil || loaded.Version != 1 || len(loaded.Rules) != 1 {
 		t.Fatalf("loaded = %#v, err = %v", loaded, err)
 	}
+}
+
+func TestSQLiteScopeLoadStateUsesSingleSnapshotDuringReplacement(t *testing.T) {
+	registerScopeSnapshotBarrier(t)
+	store := openTestStore(t)
+	ctx := context.Background()
+	if _, err := store.ReplaceScopeRules(ctx, 0, []scope.Rule{{
+		Enabled: true, Action: scope.ActionInclude, HostPattern: "scope-1.test",
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.Exec(`PRAGMA journal_mode = WAL`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.Exec(`
+		ALTER TABLE scope_state RENAME TO scope_state_backing;
+		CREATE VIEW scope_state AS
+			SELECT project_id, version + scope_snapshot_test_barrier() AS version
+			FROM scope_state_backing;
+		CREATE TRIGGER scope_state_update
+		INSTEAD OF UPDATE ON scope_state
+		BEGIN
+			UPDATE scope_state_backing SET version = NEW.version WHERE project_id = OLD.project_id;
+		END;`); err != nil {
+		t.Fatal(err)
+	}
+
+	entered, release := activateScopeSnapshotBarrier(t)
+	loaded := make(chan scope.State, 1)
+	loadErr := make(chan error, 1)
+	go func() {
+		state, err := store.LoadScopeState(ctx)
+		if err != nil {
+			loadErr <- err
+			return
+		}
+		loaded <- state
+	}()
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("load did not read scope version")
+	}
+
+	replaced := make(chan error, 1)
+	go func() {
+		_, err := store.ReplaceScopeRules(ctx, 1, []scope.Rule{{
+			Enabled: true, Action: scope.ActionInclude, HostPattern: "scope-2.test",
+		}})
+		replaced <- err
+	}()
+	select {
+	case err := <-replaced:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("replacement did not commit while version read was paused")
+	}
+	close(release)
+
+	select {
+	case err := <-loadErr:
+		t.Fatal(err)
+	case state := <-loaded:
+		if err := validateVersionedScopeState(state); err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("load did not finish")
+	}
+}
+
+func validateVersionedScopeState(state scope.State) error {
+	if len(state.Rules) != 1 {
+		return fmt.Errorf("version %d has %d rules", state.Version, len(state.Rules))
+	}
+	if got, want := state.Rules[0].HostPattern, fmt.Sprintf("scope-%d.test", state.Version); got != want {
+		return fmt.Errorf("version %d has host pattern %q, want %q", state.Version, got, want)
+	}
+	return nil
+}
+
+var (
+	registerScopeSnapshotBarrierOnce sync.Once
+	scopeSnapshotBarrier             struct {
+		sync.Mutex
+		entered chan<- struct{}
+		release <-chan struct{}
+		used    bool
+	}
+)
+
+func registerScopeSnapshotBarrier(t *testing.T) {
+	t.Helper()
+	registerScopeSnapshotBarrierOnce.Do(func() {
+		modernsqlite.MustRegisterScalarFunction("scope_snapshot_test_barrier", 0, func(*modernsqlite.FunctionContext, []driver.Value) (driver.Value, error) {
+			scopeSnapshotBarrier.Lock()
+			entered, release, used := scopeSnapshotBarrier.entered, scopeSnapshotBarrier.release, scopeSnapshotBarrier.used
+			scopeSnapshotBarrier.used = true
+			scopeSnapshotBarrier.Unlock()
+			if !used && entered != nil {
+				entered <- struct{}{}
+				<-release
+			}
+			return int64(0), nil
+		})
+	})
+}
+
+func activateScopeSnapshotBarrier(t *testing.T) (<-chan struct{}, chan<- struct{}) {
+	t.Helper()
+	entered := make(chan struct{}, 1)
+	release := make(chan struct{})
+	scopeSnapshotBarrier.Lock()
+	scopeSnapshotBarrier.entered = entered
+	scopeSnapshotBarrier.release = release
+	scopeSnapshotBarrier.used = false
+	scopeSnapshotBarrier.Unlock()
+	t.Cleanup(func() {
+		scopeSnapshotBarrier.Lock()
+		scopeSnapshotBarrier.entered = nil
+		scopeSnapshotBarrier.release = nil
+		scopeSnapshotBarrier.used = false
+		scopeSnapshotBarrier.Unlock()
+	})
+	return entered, release
 }
 
 func TestSQLiteHistoryScopeRoundTrip(t *testing.T) {
