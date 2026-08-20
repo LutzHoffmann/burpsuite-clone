@@ -10,6 +10,7 @@ import (
 
 	"github.com/lutzifer/burpsuite-clone/internal/scope"
 	"github.com/lutzifer/burpsuite-clone/internal/store"
+	"github.com/lutzifer/burpsuite-clone/internal/target"
 )
 
 type scopeUpdateDTO struct {
@@ -251,20 +252,15 @@ func (s *Server) handleTargetRebuildRetry(w http.ResponseWriter, r *http.Request
 		http.Error(w, "invalid JSON body", http.StatusBadRequest)
 		return
 	}
-	status, err := s.cfg.Target.RebuildStatus(r.Context())
-	if err != nil {
-		http.Error(w, "load target rebuild status", http.StatusInternalServerError)
-		return
-	}
-	if status.Status == "building" {
-		http.Error(w, "target rebuild already in progress", http.StatusConflict)
-		return
-	}
 	if err := s.cfg.Target.RetryRebuild(r.Context()); err != nil {
-		http.Error(w, "retry target rebuild", http.StatusInternalServerError)
+		if errors.Is(err, target.ErrRebuildInProgress) {
+			http.Error(w, "target rebuild already in progress", http.StatusConflict)
+		} else {
+			http.Error(w, "retry target rebuild", http.StatusInternalServerError)
+		}
 		return
 	}
-	status, err = s.cfg.Target.RebuildStatus(r.Context())
+	status, err := s.cfg.Target.RebuildStatus(r.Context())
 	if err != nil {
 		http.Error(w, "load target rebuild status", http.StatusInternalServerError)
 		return

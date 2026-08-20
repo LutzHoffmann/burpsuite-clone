@@ -25,8 +25,9 @@ const (
 )
 
 var (
-	errServiceClosed    = errors.New("target service is closed")
-	errProjectionFailed = errors.New("target projection failed")
+	ErrRebuildInProgress = errors.New("target rebuild is already in progress")
+	errServiceClosed     = errors.New("target service is closed")
+	errProjectionFailed  = errors.New("target projection failed")
 )
 
 type Repository interface {
@@ -231,15 +232,18 @@ func (s *Service) RetryRebuild(ctx context.Context) error {
 	if s.isClosed() {
 		return errServiceClosed
 	}
+	s.mu.Lock()
+	rebuildRunning := s.rebuildRunning
+	s.mu.Unlock()
+	if rebuildRunning {
+		return ErrRebuildInProgress
+	}
 	state, err := s.repository.LoadScopeState(ctx)
 	if err != nil {
 		return err
 	}
 	rules, err := scope.Compile(state.Version, state.Rules)
 	if err != nil {
-		return err
-	}
-	if err := s.stopRebuildLocked(); err != nil {
 		return err
 	}
 	s.scope.Replace(rules)
@@ -257,7 +261,15 @@ func (s *Service) RebuildStatus(ctx context.Context) (store.RebuildStatus, error
 	s.mu.Lock()
 	activeScopeVersion := s.activeScopeVersion
 	failedStatus := s.failedStatus
+	rebuildGenerationID := s.rebuildGenerationID
+	rebuildRunning := s.rebuildRunning
 	s.mu.Unlock()
+	if rebuildRunning && rebuildGenerationID == generation.ID {
+		status := rebuildStatus(generation, activeScopeVersion)
+		status.Status = "building"
+		status.Error = ""
+		return status, nil
+	}
 	if failedStatus != nil && failedStatus.ID == generation.ID {
 		return *failedStatus, nil
 	}

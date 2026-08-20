@@ -125,6 +125,46 @@ func TestServiceRebuildFailurePreservesActiveGenerationAndRetry(t *testing.T) {
 	}
 }
 
+func TestServiceConcurrentRetriesRejectSecondWithoutCancellingFirst(t *testing.T) {
+	sqlite := openTargetRepository(t)
+	saveExchange(t, sqlite, "https", "example.test", "/api", "")
+	repository := newControlledRepository(sqlite)
+	service := newRecoveredService(t, repository, sqlite, events.NewHub())
+	replaceRulesAndWait(t, service, 0, includeRule("example.test", "/"))
+	repository.blockPages()
+
+	start := make(chan struct{})
+	results := make(chan error, 2)
+	for range 2 {
+		go func() {
+			<-start
+			results <- service.RetryRebuild(context.Background())
+		}()
+	}
+	close(start)
+	firstErr := <-results
+	secondErr := <-results
+	cancellations := repository.cancelCount()
+	repository.releaseBlockedPages()
+	waitForRebuildStatus(t, service, "active")
+
+	accepted := 0
+	rejected := 0
+	unexpected := 0
+	for _, err := range []error{firstErr, secondErr} {
+		if err == nil {
+			accepted++
+		} else if errors.Is(err, ErrRebuildInProgress) {
+			rejected++
+		} else {
+			unexpected++
+		}
+	}
+	if accepted != 1 || rejected != 1 || unexpected != 0 || cancellations != 0 {
+		t.Fatalf("retry errors = [%v, %v], accepted = %d, rejected = %d, unexpected = %d, cancellations = %d", firstErr, secondErr, accepted, rejected, unexpected, cancellations)
+	}
+}
+
 func TestServiceFailedRebuildRejectsWritesToStaleActiveGeneration(t *testing.T) {
 	sqlite := openTargetRepository(t)
 	saveExchange(t, sqlite, "https", "example.test", "/old", "")

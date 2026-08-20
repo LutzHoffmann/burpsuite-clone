@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -703,6 +704,56 @@ func TestAPIRebuildStatusAndRetryContract(t *testing.T) {
 	waitForServiceRebuild(t, service)
 }
 
+func TestAPIConcurrentRebuildRetriesAcceptOneWithoutCancellingIt(t *testing.T) {
+	srv, service, repository := newConcurrentRetryAPIServer(t)
+	repository.beginRace()
+	responses := make(chan *httptest.ResponseRecorder, 2)
+	start := make(chan struct{})
+	for range 2 {
+		go func() {
+			<-start
+			responses <- serveAPIRequest(srv, http.MethodPost, "/api/target/rebuild", `{}`, "application/json")
+		}()
+	}
+	close(start)
+
+	collected := make([]*httptest.ResponseRecorder, 0, 2)
+	select {
+	case <-repository.statusChecksReady:
+		repository.releaseStatusChecks()
+	case response := <-responses:
+		collected = append(collected, response)
+		repository.releaseStatusChecks()
+	case <-time.After(2 * time.Second):
+		t.Fatal("concurrent retries did not reach the status/retry boundary")
+	}
+	for len(collected) < 2 {
+		select {
+		case response := <-responses:
+			collected = append(collected, response)
+		case <-time.After(2 * time.Second):
+			t.Fatal("concurrent retry response timed out")
+		}
+	}
+	cancellations := repository.cancelCount()
+	repository.releasePages()
+	waitForServiceRebuild(t, service)
+
+	accepted := 0
+	conflicts := 0
+	for _, response := range collected {
+		switch response.Code {
+		case http.StatusAccepted:
+			accepted++
+		case http.StatusConflict:
+			conflicts++
+		}
+	}
+	if accepted != 1 || conflicts != 1 || cancellations != 0 {
+		t.Fatalf("statuses = [%d, %d], accepted = %d, conflicts = %d, cancellations = %d", collected[0].Code, collected[1].Code, accepted, conflicts, cancellations)
+	}
+}
+
 func TestAPIRebuildRetryAcceptsOnlyEmptyJSONObject(t *testing.T) {
 	for _, body := range []string{"", `null`, `[]`, `{"extra":true}`, `{} {}`} {
 		t.Run(body, func(t *testing.T) {
@@ -768,6 +819,54 @@ func newTargetAPIServer(t *testing.T) (*Server, *target.Service) {
 	srv := NewServer(Config{Store: repository, Target: service, APIAddr: "127.0.0.1:9080"})
 	waitForServiceRebuild(t, service)
 	return srv, service
+}
+
+func newConcurrentRetryAPIServer(t *testing.T) (*Server, *target.Service, *retryRaceRepository) {
+	t.Helper()
+	sqlite, err := store.OpenSQLite(filepath.Join(t.TempDir(), "project.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, err := sqlite.LoadScopeState(context.Background())
+	if err != nil {
+		sqlite.Close()
+		t.Fatal(err)
+	}
+	rules, err := scope.Compile(state.Version, state.Rules)
+	if err != nil {
+		sqlite.Close()
+		t.Fatal(err)
+	}
+	repository := newRetryRaceRepository(sqlite)
+	service := target.NewService(repository, scope.NewManager(rules), events.NewHub(), target.Limits{
+		MaxJSONDepth: 16, MaxFields: 1000, MaxMultipartFields: 100,
+	})
+	if err := service.Recover(context.Background()); err != nil {
+		sqlite.Close()
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		repository.releaseStatusChecks()
+		repository.releasePages()
+		service.Close()
+		_ = sqlite.Close()
+	})
+	waitForServiceRebuild(t, service)
+	exchange := &store.Exchange{
+		Method: "GET", Scheme: "https", Host: "example.test", Path: "/api", Status: http.StatusOK,
+		StartedAt: time.Unix(1700000000, 0).UTC(),
+		Response:  store.ResponseData{Headers: http.Header{"Content-Type": {"application/json"}}, Body: []byte(`{"ok":true}`)},
+	}
+	if err := sqlite.SaveExchange(context.Background(), exchange); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.ReplaceRules(context.Background(), 0, []scope.Rule{{
+		Enabled: true, Action: scope.ActionInclude, Scheme: "https", HostPattern: "example.test", PathPrefix: "/",
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	waitForServiceRebuild(t, service)
+	return NewServer(Config{Store: sqlite, Target: service, APIAddr: "127.0.0.1:9080"}), service, repository
 }
 
 func waitForServiceRebuild(t *testing.T, service *target.Service) {
@@ -842,6 +941,119 @@ func endpointIDFromTree(t *testing.T, payload []byte) int64 {
 	}
 	t.Fatalf("endpoint id not found in tree: %s", payload)
 	return 0
+}
+
+type retryRaceRepository struct {
+	target.Repository
+
+	mu                    sync.Mutex
+	blockStatusChecks     bool
+	statusCheckCount      int
+	statusChecksReady     chan struct{}
+	releaseStatus         chan struct{}
+	releaseStatusOnce     sync.Once
+	blockPageReads        bool
+	pageStarted           chan struct{}
+	releasePage           chan struct{}
+	pageStartedOnce       sync.Once
+	releasePageOnce       sync.Once
+	targetGenerationStops int
+}
+
+func newRetryRaceRepository(repository target.Repository) *retryRaceRepository {
+	return &retryRaceRepository{Repository: repository}
+}
+
+func (r *retryRaceRepository) beginRace() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.blockStatusChecks = true
+	r.statusCheckCount = 0
+	r.statusChecksReady = make(chan struct{})
+	r.releaseStatus = make(chan struct{})
+	r.releaseStatusOnce = sync.Once{}
+	r.blockPageReads = true
+	r.pageStarted = make(chan struct{})
+	r.releasePage = make(chan struct{})
+	r.pageStartedOnce = sync.Once{}
+	r.releasePageOnce = sync.Once{}
+}
+
+func (r *retryRaceRepository) LatestTargetGeneration(ctx context.Context) (store.TargetGeneration, error) {
+	r.mu.Lock()
+	if !r.blockStatusChecks {
+		r.mu.Unlock()
+		return r.Repository.LatestTargetGeneration(ctx)
+	}
+	r.statusCheckCount++
+	if r.statusCheckCount == 2 {
+		close(r.statusChecksReady)
+	}
+	release := r.releaseStatus
+	r.mu.Unlock()
+	select {
+	case <-release:
+	case <-ctx.Done():
+		return store.TargetGeneration{}, ctx.Err()
+	}
+	return r.Repository.LatestTargetGeneration(ctx)
+}
+
+func (r *retryRaceRepository) ListExchangesPage(ctx context.Context, afterID, throughID int64, limit int) ([]store.Exchange, error) {
+	r.mu.Lock()
+	if !r.blockPageReads {
+		r.mu.Unlock()
+		return r.Repository.ListExchangesPage(ctx, afterID, throughID, limit)
+	}
+	r.pageStartedOnce.Do(func() { close(r.pageStarted) })
+	release := r.releasePage
+	r.mu.Unlock()
+	select {
+	case <-release:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	return r.Repository.ListExchangesPage(ctx, afterID, throughID, limit)
+}
+
+func (r *retryRaceRepository) CancelTargetGeneration(ctx context.Context, generationID int64) error {
+	err := r.Repository.CancelTargetGeneration(ctx, generationID)
+	if err == nil {
+		r.mu.Lock()
+		r.targetGenerationStops++
+		r.mu.Unlock()
+	}
+	return err
+}
+
+func (r *retryRaceRepository) releaseStatusChecks() {
+	r.mu.Lock()
+	if r.releaseStatus == nil {
+		r.mu.Unlock()
+		return
+	}
+	r.blockStatusChecks = false
+	release := r.releaseStatus
+	r.mu.Unlock()
+	r.releaseStatusOnce.Do(func() { close(release) })
+}
+
+func (r *retryRaceRepository) releasePages() {
+	r.mu.Lock()
+	if r.releasePage == nil {
+		r.mu.Unlock()
+		return
+	}
+	r.blockPageReads = false
+	release := r.releasePage
+	r.mu.Unlock()
+	r.releasePageOnce.Do(func() { close(release) })
+}
+
+func (r *retryRaceRepository) cancelCount() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.targetGenerationStops
 }
 
 func waitForAPIQueue(t *testing.T, queue *intercept.Queue) {
