@@ -14,6 +14,61 @@ var migrations = []migration{
 	{version: 1, apply: applyInitialSchema},
 	{version: 2, apply: applyProjectAndRepeaterSchema},
 	{version: 3, apply: applyTargetScopeSchema},
+	{version: 4, apply: applyTargetProjectionSchema},
+}
+
+func applyTargetProjectionSchema(tx *sql.Tx) error {
+	_, err := tx.Exec(`
+		CREATE TABLE target_generations (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+			scope_version INTEGER NOT NULL,
+			status TEXT NOT NULL CHECK(status IN ('building', 'active', 'retired', 'failed', 'cancelled')),
+			processed INTEGER NOT NULL,
+			total INTEGER NOT NULL,
+			error TEXT NOT NULL,
+			started_at_unix_nano INTEGER NOT NULL,
+			completed_at_unix_nano INTEGER
+		);
+		ALTER TABLE scope_state ADD COLUMN active_target_generation_id INTEGER REFERENCES target_generations(id);
+		CREATE TABLE target_endpoints (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			generation_id INTEGER NOT NULL REFERENCES target_generations(id) ON DELETE CASCADE,
+			scheme TEXT NOT NULL,
+			host TEXT NOT NULL,
+			port INTEGER NOT NULL,
+			path TEXT NOT NULL,
+			method TEXT NOT NULL,
+			first_seen_unix_nano INTEGER NOT NULL,
+			last_seen_unix_nano INTEGER NOT NULL,
+			observation_count INTEGER NOT NULL,
+			latest_exchange_id INTEGER NOT NULL REFERENCES exchanges(id),
+			statuses_json TEXT NOT NULL,
+			request_mimes_json TEXT NOT NULL,
+			response_mimes_json TEXT NOT NULL,
+			parse_diagnostics_json TEXT NOT NULL,
+			error_seen INTEGER NOT NULL,
+			UNIQUE(generation_id, scheme, host, port, path, method)
+		);
+		CREATE TABLE target_endpoint_exchanges (
+			endpoint_id INTEGER NOT NULL REFERENCES target_endpoints(id) ON DELETE CASCADE,
+			exchange_id INTEGER NOT NULL REFERENCES exchanges(id) ON DELETE CASCADE,
+			PRIMARY KEY(endpoint_id, exchange_id)
+		);
+		CREATE TABLE target_parameters (
+			endpoint_id INTEGER NOT NULL REFERENCES target_endpoints(id) ON DELETE CASCADE,
+			location TEXT NOT NULL,
+			name TEXT NOT NULL,
+			value_type TEXT NOT NULL,
+			first_seen_unix_nano INTEGER NOT NULL,
+			last_seen_unix_nano INTEGER NOT NULL,
+			observation_count INTEGER NOT NULL,
+			PRIMARY KEY(endpoint_id, location, name, value_type)
+		);
+		CREATE INDEX target_generations_project_id ON target_generations(project_id, id DESC);
+		CREATE INDEX target_endpoints_generation_id ON target_endpoints(generation_id, id);
+		CREATE INDEX target_endpoint_exchanges_exchange_id ON target_endpoint_exchanges(exchange_id);`)
+	return err
 }
 
 func applyTargetScopeSchema(tx *sql.Tx) error {
