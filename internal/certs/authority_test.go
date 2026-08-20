@@ -7,6 +7,7 @@ import (
 	"encoding/pem"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -103,6 +104,9 @@ func TestLoadOrCreateAuthorityRecoversMismatchedPair(t *testing.T) {
 }
 
 func TestLoadOrCreateAuthorityRestrictsKeyPermissions(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX permission bits are not meaningful for Windows ACLs")
+	}
 	dir := t.TempDir()
 	if _, err := LoadOrCreateAuthority(dir); err != nil {
 		t.Fatal(err)
