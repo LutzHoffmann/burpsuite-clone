@@ -56,10 +56,37 @@ func sameOrigin(r *http.Request) bool {
 		return true
 	}
 	parsed, err := url.Parse(origin)
-	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" || parsed.User != nil ||
+		parsed.Path != "" || parsed.RawQuery != "" || parsed.Fragment != "" {
 		return false
 	}
-	return strings.EqualFold(parsed.Host, r.Host)
+
+	requestScheme := "http"
+	if r.TLS != nil {
+		requestScheme = "https"
+	}
+	requestURL, err := url.Parse("//" + r.Host)
+	if err != nil || requestURL.Hostname() == "" {
+		return false
+	}
+	requestURL.Scheme = requestScheme
+
+	return strings.EqualFold(parsed.Scheme, requestScheme) &&
+		strings.EqualFold(parsed.Hostname(), requestURL.Hostname()) &&
+		effectivePort(parsed) == effectivePort(requestURL)
+}
+
+func effectivePort(value *url.URL) string {
+	if port := value.Port(); port != "" {
+		return port
+	}
+	if strings.EqualFold(value.Scheme, "http") {
+		return "80"
+	}
+	if strings.EqualFold(value.Scheme, "https") {
+		return "443"
+	}
+	return ""
 }
 
 func (s *Server) decodeJSON(w http.ResponseWriter, r *http.Request, destination interface{}) error {

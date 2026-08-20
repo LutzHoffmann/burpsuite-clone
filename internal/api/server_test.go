@@ -220,6 +220,30 @@ func TestAPIRejectsCrossSiteOriginForStateChange(t *testing.T) {
 	}
 }
 
+func TestAPIRejectsMismatchedOriginSchemeForStateChange(t *testing.T) {
+	srv := NewServer(Config{APIAddr: "127.0.0.1:9080"})
+	request := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:9080/api/intercept/missing/drop", strings.NewReader(`{}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Origin", "https://127.0.0.1:9080")
+	recorder := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusForbidden {
+		t.Fatalf("status = %d", recorder.Code)
+	}
+}
+
+func TestAPIAllowsMatchingOriginForStateChange(t *testing.T) {
+	srv := NewServer(Config{APIAddr: "127.0.0.1:9080"})
+	request := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:9080/api/intercept/missing/drop", strings.NewReader(`{}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Origin", "http://127.0.0.1:9080")
+	recorder := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d", recorder.Code)
+	}
+}
+
 func TestAPIRejectsCrossSiteWebSocketOrigin(t *testing.T) {
 	srv := NewServer(Config{APIAddr: "127.0.0.1:9080"})
 	request := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:9080/api/events", nil)

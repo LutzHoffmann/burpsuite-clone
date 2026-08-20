@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/tls"
@@ -385,6 +386,118 @@ func TestProxyPersistsUpstreamFailures(t *testing.T) {
 	saved := waitForSavedExchanges(t, mem, 1)
 	if !saved[0].Error || !strings.Contains(saved[0].ErrorMessage, "dns lookup failed") {
 		t.Fatalf("saved exchange = %#v", saved)
+	}
+}
+
+func TestHTTPProxyTimesOutStalledUpstreamBody(t *testing.T) {
+	release := make(chan struct{})
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Length", "1")
+		w.WriteHeader(http.StatusOK)
+		w.(http.Flusher).Flush()
+		<-release
+	}))
+	defer func() {
+		close(release)
+		target.Close()
+	}()
+
+	srv := NewServer(Config{
+		Store:             store.NewMemoryForTests(),
+		BodyLimitBytes:    1024,
+		StreamIdleTimeout: 100 * time.Millisecond,
+	})
+	ln := listenForTest(t)
+	defer ln.Close()
+	go func() { _ = srv.Serve(ln) }()
+
+	response, err := proxyClient(ln.Addr().String(), nil).Get(target.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	started := time.Now()
+	_, err = io.ReadAll(response.Body)
+	if err == nil {
+		t.Fatal("stalled upstream response completed without an error")
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("stalled response took %s to terminate", elapsed)
+	}
+}
+
+func TestHTTPProxyAllowsLongResponseWhileDataKeepsFlowing(t *testing.T) {
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Length", "4")
+		for _, chunk := range []byte("flow") {
+			_, _ = w.Write([]byte{chunk})
+			w.(http.Flusher).Flush()
+			time.Sleep(75 * time.Millisecond)
+		}
+	}))
+	defer target.Close()
+
+	srv := NewServer(Config{
+		Store:             store.NewMemoryForTests(),
+		BodyLimitBytes:    1024,
+		StreamIdleTimeout: 200 * time.Millisecond,
+	})
+	ln := listenForTest(t)
+	defer ln.Close()
+	go func() { _ = srv.Serve(ln) }()
+
+	response, err := proxyClient(ln.Addr().String(), nil).Get(target.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	body, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(body) != "flow" {
+		t.Fatalf("body = %q", body)
+	}
+}
+
+func TestHTTPProxyTimesOutStalledClientRequestBody(t *testing.T) {
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer target.Close()
+	targetURL := mustParseURL(t, target.URL)
+
+	srv := NewServer(Config{
+		Store:             store.NewMemoryForTests(),
+		BodyLimitBytes:    1024,
+		StreamIdleTimeout: 100 * time.Millisecond,
+	})
+	ln := listenForTest(t)
+	defer ln.Close()
+	go func() { _ = srv.Serve(ln) }()
+
+	connection, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer connection.Close()
+	request := "POST " + target.URL + "/upload HTTP/1.1\r\n" +
+		"Host: " + targetURL.Host + "\r\n" +
+		"Content-Length: 4\r\nConnection: close\r\n\r\nx"
+	if _, err := io.WriteString(connection, request); err != nil {
+		t.Fatal(err)
+	}
+	if err := connection.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	response, err := http.ReadResponse(bufio.NewReader(connection), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusBadGateway {
+		t.Fatalf("status = %d", response.StatusCode)
 	}
 }
 

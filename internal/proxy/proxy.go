@@ -26,18 +26,19 @@ import (
 )
 
 const (
-	serverReadHeaderTimeout = 10 * time.Second
-	serverIdleTimeout       = 2 * time.Minute
-	tunnelIOTimeout         = 2 * time.Minute
+	serverReadHeaderTimeout  = 10 * time.Second
+	serverIdleTimeout        = 2 * time.Minute
+	defaultStreamIdleTimeout = 2 * time.Minute
 )
 
 type Config struct {
-	Store          store.Store
-	BodyLimitBytes int64
-	Transport      http.RoundTripper
-	Authority      *certs.Authority
-	Events         *events.Hub
-	Intercept      *intercept.Controller
+	Store             store.Store
+	BodyLimitBytes    int64
+	Transport         http.RoundTripper
+	Authority         *certs.Authority
+	Events            *events.Hub
+	Intercept         *intercept.Controller
+	StreamIdleTimeout time.Duration
 }
 
 type Server struct {
@@ -55,15 +56,25 @@ type preparedRequest struct {
 }
 
 func NewServer(cfg Config) *Server {
+	if cfg.StreamIdleTimeout <= 0 {
+		cfg.StreamIdleTimeout = defaultStreamIdleTimeout
+	}
 	if cfg.Transport == nil {
-		cfg.Transport = defaultTransport()
+		cfg.Transport = defaultTransport(cfg.StreamIdleTimeout)
 	}
 	return &Server{cfg: cfg}
 }
 
-func defaultTransport() *http.Transport {
+func defaultTransport(streamIdleTimeout time.Duration) *http.Transport {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
-	transport.DialContext = (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}).DialContext
+	dialer := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
+	transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+		connection, err := dialer.DialContext(ctx, network, address)
+		if err != nil {
+			return nil, err
+		}
+		return withIdleTimeout(connection, streamIdleTimeout), nil
+	}
 	transport.TLSHandshakeTimeout = 10 * time.Second
 	transport.ResponseHeaderTimeout = 30 * time.Second
 	transport.IdleConnTimeout = 90 * time.Second
@@ -75,6 +86,9 @@ func (s *Server) Serve(listener net.Listener) error {
 		Handler:           http.HandlerFunc(s.handleHTTP),
 		ReadHeaderTimeout: serverReadHeaderTimeout,
 		IdleTimeout:       serverIdleTimeout,
+		ConnContext: func(ctx context.Context, connection net.Conn) context.Context {
+			return context.WithValue(ctx, clientConnectionKey{}, connection)
+		},
 	}
 	return server.Serve(listener)
 }
@@ -83,6 +97,10 @@ func (s *Server) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodConnect {
 		s.handleConnect(w, r)
 		return
+	}
+	client := clientConnection(r.Context())
+	if client != nil && r.Body != nil {
+		r.Body = &idleTimeoutReadCloser{ReadCloser: r.Body, connection: client, timeout: s.cfg.StreamIdleTimeout}
 	}
 
 	startedAt := time.Now().UTC()
@@ -109,8 +127,16 @@ func (s *Server) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	clientHeaders := response.Header.Clone()
 	stripHopByHopHeaders(clientHeaders)
 	copyHeaders(w.Header(), clientHeaders)
+	if client != nil {
+		_ = client.SetWriteDeadline(time.Now().Add(s.cfg.StreamIdleTimeout))
+		defer func() { _ = client.SetWriteDeadline(time.Time{}) }()
+	}
 	w.WriteHeader(response.StatusCode)
-	_, copyErr := io.Copy(w, capturedResponse)
+	destination := io.Writer(w)
+	if client != nil {
+		destination = &idleTimeoutWriter{Writer: w, connection: client, timeout: s.cfg.StreamIdleTimeout}
+	}
+	_, copyErr := io.Copy(destination, capturedResponse)
 	closeErr := capturedResponse.Close()
 	if copyErr != nil {
 		log.Printf("proxy: stream upstream response: %v", copyErr)
@@ -132,6 +158,7 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 		log.Printf("proxy: hijack CONNECT connection: %v", err)
 		return
 	}
+	client = withIdleTimeout(client, s.cfg.StreamIdleTimeout)
 	defer client.Close()
 
 	host := r.Host
@@ -151,14 +178,14 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 
 	tlsClient := tls.Server(client, &tls.Config{Certificates: []tls.Certificate{certificate}, MinVersion: tls.VersionTLS12})
 	defer tlsClient.Close()
-	_ = tlsClient.SetDeadline(time.Now().Add(tunnelIOTimeout))
+	_ = tlsClient.SetDeadline(time.Now().Add(s.cfg.StreamIdleTimeout))
 	if err := tlsClient.Handshake(); err != nil {
 		log.Printf("proxy: handshake CONNECT client: %v", err)
 		return
 	}
 	reader := bufio.NewReader(tlsClient)
 	for {
-		_ = tlsClient.SetReadDeadline(time.Now().Add(tunnelIOTimeout))
+		_ = tlsClient.SetReadDeadline(time.Now().Add(s.cfg.StreamIdleTimeout))
 		inner, err := http.ReadRequest(reader)
 		if err != nil {
 			if !errors.Is(err, io.EOF) && !isTimeout(err) {
@@ -196,7 +223,7 @@ func (s *Server) forwardHTTPS(client net.Conn, request *http.Request) bool {
 	responseHeaders := response.Header.Clone()
 	stripHopByHopHeaders(response.Header)
 	response.Body = capturedResponse
-	_ = client.SetWriteDeadline(time.Now().Add(tunnelIOTimeout))
+	_ = client.SetWriteDeadline(time.Now().Add(s.cfg.StreamIdleTimeout))
 	writeErr := response.Write(client)
 	closeErr := capturedResponse.Close()
 	if writeErr != nil {
