@@ -7,6 +7,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net"
@@ -263,6 +264,128 @@ func TestProxyScopeObserverFailureDoesNotChangeResponseOrLeakError(t *testing.T)
 	if strings.Contains(logs.String(), "secret request body") {
 		t.Fatalf("observer error leaked into logs: %q", logs.String())
 	}
+}
+
+func TestProxyPublishesHistoryEventBeforeTargetObservation(t *testing.T) {
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(target.Close)
+	mem := &memoryStore{}
+	hub := events.NewHub()
+	subscriber, unsubscribe := hub.Subscribe()
+	t.Cleanup(unsubscribe)
+	observerCalled := false
+	var observerErr error
+	srv := NewServer(Config{
+		Store: mem, BodyLimitBytes: 1024, Events: hub,
+		Target: targetObserverFunc(func(_ context.Context, exchange *store.Exchange) error {
+			observerCalled = true
+			if exchange.ID == 0 {
+				observerErr = errors.New("exchange has no durable ID")
+				return observerErr
+			}
+			saved := mem.snapshot()
+			if len(saved) != 1 || saved[0].ID != exchange.ID {
+				observerErr = fmt.Errorf("saved exchanges = %#v", saved)
+				return observerErr
+			}
+			select {
+			case event := <-subscriber:
+				data, ok := event.Data.(map[string]interface{})
+				if event.Type != "history.entry.created" || !ok || data["id"] != exchange.ID {
+					observerErr = fmt.Errorf("history event = %#v", event)
+					return observerErr
+				}
+			default:
+				observerErr = errors.New("history event was not observable inside target observer")
+				return observerErr
+			}
+			return nil
+		}),
+	})
+
+	recorder := httptest.NewRecorder()
+	srv.handleHTTP(recorder, httptest.NewRequest(http.MethodGet, target.URL+"/ordered", nil))
+
+	if recorder.Code != http.StatusNoContent {
+		t.Fatalf("status = %d", recorder.Code)
+	}
+	if !observerCalled || observerErr != nil {
+		t.Fatalf("observer called = %t, error = %v", observerCalled, observerErr)
+	}
+}
+
+func TestProxyStoresCaptureTimeScopeDecisionWhenRulesChangeDuringInterception(t *testing.T) {
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(target.Close)
+	targetURL := mustParseURL(t, target.URL)
+	initial, err := scope.Compile(31, []scope.Rule{{
+		ID: 301, Enabled: true, Action: scope.ActionInclude, HostPattern: targetURL.Hostname(),
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	replacement, err := scope.Compile(32, []scope.Rule{{
+		ID: 302, Enabled: true, Action: scope.ActionInclude, HostPattern: targetURL.Hostname(),
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager := scope.NewManager(initial)
+	queue := intercept.NewQueue(time.Second)
+	queued := make(chan intercept.Item, 1)
+	queue.SetObserver(func(change intercept.Change) {
+		if change.Type == "queued" {
+			queued <- change.Item
+		}
+	})
+	mem := &memoryStore{}
+	srv := NewServer(Config{
+		Store: mem, BodyLimitBytes: 1024, Scope: manager,
+		Intercept: intercept.NewController(queue, true, []intercept.Rule{{Enabled: true}}),
+	})
+	proxyServer := httptest.NewServer(http.HandlerFunc(srv.handleHTTP))
+	t.Cleanup(proxyServer.Close)
+	client := &http.Client{Transport: &http.Transport{Proxy: http.ProxyURL(mustParseURL(t, proxyServer.URL))}}
+	t.Cleanup(client.CloseIdleConnections)
+	responses := make(chan *http.Response, 1)
+	errs := make(chan error, 1)
+	go func() {
+		response, err := client.Get(target.URL + "/capture-time")
+		if err != nil {
+			errs <- err
+			return
+		}
+		responses <- response
+	}()
+
+	var item intercept.Item
+	select {
+	case item = <-queued:
+	case <-time.After(time.Second):
+		t.Fatal("request did not enter interception")
+	}
+	manager.Replace(replacement)
+	if err := queue.Forward(item.ID, intercept.RequestEdit{}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-errs:
+		t.Fatal(err)
+	case response := <-responses:
+		defer response.Body.Close()
+		if response.StatusCode != http.StatusNoContent {
+			t.Fatalf("status = %d", response.StatusCode)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("forwarded request did not complete")
+	}
+
+	exchange := waitForSavedExchanges(t, mem, 1)[0]
+	assertScopeDecision(t, exchange, true, 31, 301)
 }
 
 func TestHTTPProxyCapturesExchange(t *testing.T) {

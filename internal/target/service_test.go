@@ -334,6 +334,30 @@ func TestServiceObserveVersionMismatchDoesNotContaminateActiveGeneration(t *test
 	}
 }
 
+func TestServiceObserveSameVersionOutOfScopeDoesNotWriteTargetObservation(t *testing.T) {
+	sqlite := openTargetRepository(t)
+	repository := newControlledRepository(sqlite)
+	service := newRecoveredService(t, repository, sqlite, events.NewHub())
+	replaceRulesAndWait(t, service, 0, includeRule("example.test", "/"))
+	before := repository.upsertAttemptCount()
+	exchange := saveScopedExchange(t, sqlite, "example.test", "/outside", false, 1)
+
+	if err := service.Observe(context.Background(), exchange); err != nil {
+		t.Fatal(err)
+	}
+
+	if after := repository.upsertAttemptCount(); after != before {
+		t.Fatalf("target observation writes = %d, want %d", after, before)
+	}
+	tree, err := service.Tree(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if treeHasPath(tree, "/outside") {
+		t.Fatalf("out-of-scope endpoint was projected: %#v", tree)
+	}
+}
+
 func TestServiceReplacementDrainsActiveObservationBeforeStartingPendingGeneration(t *testing.T) {
 	sqlite := openTargetRepository(t)
 	repository := newControlledRepository(sqlite)
@@ -809,6 +833,7 @@ type controlledRepository struct {
 	markFailures       []error
 	permanentMarkError error
 	markAttempts       int
+	upsertAttempts     int
 	cancelled          []int64
 	prunes             int
 }
@@ -840,6 +865,7 @@ func (r *controlledRepository) ListExchangesPage(ctx context.Context, afterID, t
 
 func (r *controlledRepository) UpsertTargetObservation(ctx context.Context, generationID int64, observation store.TargetObservation) error {
 	r.mu.Lock()
+	r.upsertAttempts++
 	failure := r.upsertFailure
 	block := r.blockUpsert
 	started := r.upsertStarted
@@ -1031,6 +1057,12 @@ func (r *controlledRepository) failureMarkAttemptCount() int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.markAttempts
+}
+
+func (r *controlledRepository) upsertAttemptCount() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.upsertAttempts
 }
 
 type sqliteBusyTestError struct{}
