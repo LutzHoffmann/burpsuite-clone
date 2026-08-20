@@ -63,6 +63,32 @@ func TestAnalyzeExtractsNonFileMultipartParameters(t *testing.T) {
 	assertParameters(t, observation.Parameters, []store.TargetParameter{{Location: "multipart", Name: "title", ValueType: "string"}})
 }
 
+func TestAnalyzeExcludesMultipartFilePartWithEmptyFilename(t *testing.T) {
+	body := "--x\r\nContent-Disposition: form-data; name=\"upload\"; filename=\"\"\r\nContent-Type: text/plain\r\n\r\nsecret file\r\n--x--\r\n"
+	observation := analyze(t, &store.Exchange{
+		Scheme: "http", Host: "example.test", Path: "/upload", Method: "POST",
+		Request: store.RequestData{Headers: http.Header{"Content-Type": {"multipart/form-data; boundary=x"}}, Body: []byte(body)},
+	})
+	if len(observation.Parameters) != 0 {
+		t.Fatalf("parameters = %#v, want none", observation.Parameters)
+	}
+}
+
+func TestAnalyzeDiagnosesMalformedMultipartDispositionWithoutPartialParameters(t *testing.T) {
+	body := "--x\r\nContent-Disposition: form-data; name=\"title\"\r\n\r\nprivate title\r\n" +
+		"--x\r\nContent-Disposition: form-data; name=\"broken\r\n\r\nsecret\r\n--x--\r\n"
+	observation := analyze(t, &store.Exchange{
+		Scheme: "http", Host: "example.test", Path: "/upload", Method: "POST",
+		Request: store.RequestData{Headers: http.Header{"Content-Type": {"multipart/form-data; boundary=x"}}, Body: []byte(body)},
+	})
+	if observation.ParseDiagnostic != "multipart_malformed" {
+		t.Fatalf("diagnostic = %q, want multipart_malformed", observation.ParseDiagnostic)
+	}
+	if len(observation.Parameters) != 0 {
+		t.Fatalf("parameters = %#v, want none", observation.Parameters)
+	}
+}
+
 func TestAnalyzeExtractsJSONCompositeTypesAndArrayPaths(t *testing.T) {
 	observation := analyze(t, &store.Exchange{
 		Scheme: "http", Host: "example.test", Path: "/payload", Method: "POST",

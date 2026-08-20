@@ -339,11 +339,29 @@ func multipartParameters(body []byte, boundary string, maxFields int) ([]store.T
 			_ = part.Close()
 			return nil, diagnosticMultipartFieldLimit
 		}
-		if part.FileName() == "" && part.FormName() != "" {
-			parameters = append(parameters, targetParameter("multipart", part.FormName(), "string"))
+		name, isFile, err := multipartPartName(part)
+		if err != nil {
+			_ = part.Close()
+			return nil, diagnosticMultipartMalformed
+		}
+		if !isFile {
+			parameters = append(parameters, targetParameter("multipart", name, "string"))
 		}
 		_ = part.Close()
 	}
+}
+
+func multipartPartName(part *multipart.Part) (string, bool, error) {
+	disposition, params, err := mime.ParseMediaType(part.Header.Get("Content-Disposition"))
+	if err != nil || !strings.EqualFold(disposition, "form-data") {
+		return "", false, errors.New("invalid multipart disposition")
+	}
+	name, ok := params["name"]
+	if !ok || name == "" {
+		return "", false, errors.New("missing multipart field name")
+	}
+	_, isFile := params["filename"]
+	return name, isFile, nil
 }
 
 func hasMultipartClosingBoundary(body []byte, boundary string) bool {
