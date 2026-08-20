@@ -46,6 +46,30 @@ type ResponseData struct {
 	Raw     []byte
 }
 
+type TargetEndpointKey struct {
+	Scheme, Host string
+	Port         int
+	Path, Method string
+}
+
+type TargetParameter struct {
+	Location, Name, ValueType string
+	FirstSeen, LastSeen       time.Time
+	Count                     int64
+}
+
+type TargetObservation struct {
+	Key             TargetEndpointKey
+	ExchangeID      int64
+	StartedAt       time.Time
+	Status          int
+	RequestMIME     string
+	ResponseMIME    string
+	Error           bool
+	Parameters      []TargetParameter
+	ParseDiagnostic string
+}
+
 type HistoryItem struct {
 	ID           int64     `json:"id"`
 	Method       string    `json:"method"`
