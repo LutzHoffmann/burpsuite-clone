@@ -3,6 +3,8 @@ package store
 import (
 	"context"
 	"time"
+
+	"github.com/lutzifer/burpsuite-clone/internal/scope"
 )
 
 type Exchange struct {
@@ -23,6 +25,9 @@ type Exchange struct {
 	ErrorMessage      string
 	RequestTruncated  bool
 	ResponseTruncated bool
+	InScope           bool
+	ScopeVersion      int64
+	ScopeRuleID       *int64
 	Request           RequestData
 	Response          ResponseData
 	Tags              []string
@@ -56,6 +61,9 @@ type HistoryItem struct {
 	StartedAt    time.Time `json:"startedAt"`
 	Intercepted  bool      `json:"intercepted"`
 	Error        bool      `json:"error"`
+	InScope      bool      `json:"inScope"`
+	ScopeVersion int64     `json:"scopeVersion"`
+	ScopeRuleID  *int64    `json:"scopeRuleId"`
 }
 
 type HistoryFilter struct {
@@ -69,4 +77,15 @@ type Store interface {
 	ListHistory(ctx context.Context, filter HistoryFilter) ([]HistoryItem, error)
 	GetExchange(ctx context.Context, id int64) (*Exchange, error)
 	Close() error
+}
+
+type ScopeStore interface {
+	LoadScopeState(context.Context) (scope.State, error)
+	ReplaceScopeRules(context.Context, int64, []scope.Rule) (scope.State, error)
+}
+
+type RebuildHistoryStore interface {
+	LatestExchangeID(context.Context) (int64, error)
+	CountExchangesThrough(context.Context, int64) (int64, error)
+	ListExchangesPage(context.Context, int64, int64, int) ([]Exchange, error)
 }

@@ -13,6 +13,34 @@ type migration struct {
 var migrations = []migration{
 	{version: 1, apply: applyInitialSchema},
 	{version: 2, apply: applyProjectAndRepeaterSchema},
+	{version: 3, apply: applyTargetScopeSchema},
+}
+
+func applyTargetScopeSchema(tx *sql.Tx) error {
+	_, err := tx.Exec(`
+		ALTER TABLE exchanges ADD COLUMN in_scope INTEGER NOT NULL DEFAULT 0;
+		ALTER TABLE exchanges ADD COLUMN scope_version INTEGER NOT NULL DEFAULT 0;
+		ALTER TABLE exchanges ADD COLUMN scope_rule_id INTEGER;
+
+		CREATE TABLE scope_state (
+			project_id INTEGER PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
+			version INTEGER NOT NULL
+		);
+		INSERT INTO scope_state(project_id, version) SELECT id, 0 FROM projects;
+
+		CREATE TABLE scope_rules (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+			enabled INTEGER NOT NULL,
+			action TEXT NOT NULL CHECK(action IN ('include', 'exclude')),
+			scheme TEXT NOT NULL,
+			host_pattern TEXT NOT NULL,
+			port INTEGER NOT NULL,
+			path_prefix TEXT NOT NULL,
+			position INTEGER NOT NULL
+		);
+		CREATE INDEX scope_rules_project_position ON scope_rules(project_id, position);`)
+	return err
 }
 
 func applyProjectAndRepeaterSchema(tx *sql.Tx) error {

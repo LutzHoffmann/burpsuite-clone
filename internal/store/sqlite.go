@@ -62,13 +62,15 @@ func (s *SQLiteStore) SaveExchange(ctx context.Context, exchange *Exchange) erro
 		INSERT INTO exchanges (
 			method, scheme, host, path, query, status, mime_type, request_size, response_size,
 			duration_ms, started_at_unix_nano, intercepted, error, error_message,
-			request_truncated, response_truncated, tags_json, note
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			request_truncated, response_truncated, in_scope, scope_version, scope_rule_id,
+			tags_json, note
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		exchange.Method, exchange.Scheme, exchange.Host, exchange.Path, exchange.Query,
 		exchange.Status, exchange.MIMEType, exchange.RequestSize, exchange.ResponseSize,
 		exchange.Duration.Milliseconds(), exchange.StartedAt.UnixNano(), exchange.Intercepted,
 		exchange.Error, exchange.ErrorMessage, exchange.RequestTruncated,
-		exchange.ResponseTruncated, string(tags), exchange.Note,
+		exchange.ResponseTruncated, exchange.InScope, exchange.ScopeVersion, exchange.ScopeRuleID,
+		string(tags), exchange.Note,
 	)
 	if err != nil {
 		return fmt.Errorf("insert exchange: %w", err)
@@ -99,7 +101,8 @@ func (s *SQLiteStore) SaveExchange(ctx context.Context, exchange *Exchange) erro
 func (s *SQLiteStore) ListHistory(ctx context.Context, filter HistoryFilter) ([]HistoryItem, error) {
 	query := `
 		SELECT id, method, scheme, host, path, query, status, mime_type, request_size,
-			response_size, duration_ms, started_at_unix_nano, intercepted, error
+			response_size, duration_ms, started_at_unix_nano, intercepted, error,
+			in_scope, scope_version, scope_rule_id
 		FROM exchanges`
 	var conditions []string
 	var args []any
@@ -135,6 +138,7 @@ func (s *SQLiteStore) ListHistory(ctx context.Context, filter HistoryFilter) ([]
 			&item.ID, &item.Method, &item.Scheme, &item.Host, &item.Path, &item.Query,
 			&item.Status, &item.MIMEType, &item.RequestSize, &item.ResponseSize,
 			&item.DurationMS, &startedAt, &item.Intercepted, &item.Error,
+			&item.InScope, &item.ScopeVersion, &item.ScopeRuleID,
 		); err != nil {
 			return nil, fmt.Errorf("scan history item: %w", err)
 		}
@@ -155,7 +159,7 @@ func (s *SQLiteStore) GetExchange(ctx context.Context, id int64) (*Exchange, err
 		SELECT e.method, e.scheme, e.host, e.path, e.query, e.status, e.mime_type,
 			e.request_size, e.response_size, e.duration_ms, e.started_at_unix_nano,
 			e.intercepted, e.error, e.error_message, e.request_truncated,
-			e.response_truncated, e.tags_json, e.note, b.request_headers_json,
+			e.response_truncated, e.in_scope, e.scope_version, e.scope_rule_id, e.tags_json, e.note, b.request_headers_json,
 			b.request_body, b.request_raw, b.response_headers_json, b.response_body, b.response_raw
 		FROM exchanges e
 		JOIN exchange_bodies b ON b.exchange_id = e.id
@@ -164,6 +168,7 @@ func (s *SQLiteStore) GetExchange(ctx context.Context, id int64) (*Exchange, err
 		&exchange.Status, &exchange.MIMEType, &exchange.RequestSize, &exchange.ResponseSize,
 		&exchange.Duration, &startedAt, &exchange.Intercepted, &exchange.Error,
 		&exchange.ErrorMessage, &exchange.RequestTruncated, &exchange.ResponseTruncated,
+		&exchange.InScope, &exchange.ScopeVersion, &exchange.ScopeRuleID,
 		&tagsJSON, &exchange.Note, &requestHeadersJSON, &exchange.Request.Body,
 		&exchange.Request.Raw, &responseHeadersJSON, &exchange.Response.Body, &exchange.Response.Raw,
 	)

@@ -53,6 +53,9 @@ func (s *memoryStore) ListHistory(_ context.Context, filter HistoryFilter) ([]Hi
 			StartedAt:    exchange.StartedAt,
 			Intercepted:  exchange.Intercepted,
 			Error:        exchange.Error,
+			InScope:      exchange.InScope,
+			ScopeVersion: exchange.ScopeVersion,
+			ScopeRuleID:  exchange.ScopeRuleID,
 		})
 	}
 	return history, nil
