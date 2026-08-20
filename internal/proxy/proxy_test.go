@@ -8,6 +8,7 @@ import (
 	"crypto/x509"
 	"errors"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -21,8 +22,248 @@ import (
 	"github.com/lutzifer/burpsuite-clone/internal/certs"
 	"github.com/lutzifer/burpsuite-clone/internal/events"
 	"github.com/lutzifer/burpsuite-clone/internal/intercept"
+	"github.com/lutzifer/burpsuite-clone/internal/scope"
 	"github.com/lutzifer/burpsuite-clone/internal/store"
 )
+
+func TestProxyForwardsAndStoresOutOfScopeWithoutIntercepting(t *testing.T) {
+	rules, err := scope.Compile(1, []scope.Rule{{
+		ID: 1, Enabled: true, Action: scope.ActionInclude, HostPattern: "allowed.test",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	controller := intercept.NewController(intercept.NewQueue(time.Second), true, []intercept.Rule{{Enabled: true}})
+	mem := &memoryStore{}
+	observer := &recordingTargetObserver{store: mem}
+	srv := NewServer(Config{
+		Store: mem, BodyLimitBytes: 1024, Intercept: controller,
+		Scope: scope.NewManager(rules), Target: observer,
+	})
+
+	response := serveRequestThroughProxy(t, srv, outOfScopeTargetURL(t))
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", response.StatusCode)
+	}
+	if len(controller.Queue().List()) != 0 {
+		t.Fatal("out-of-scope request entered intercept queue")
+	}
+	exchange := waitForSavedExchanges(t, mem, 1)[0]
+	if exchange.InScope || exchange.ScopeVersion != 1 || exchange.ScopeRuleID != nil {
+		t.Fatalf("exchange = %#v", exchange)
+	}
+	observed := observer.snapshot()
+	if len(observed) != 1 || observed[0].ID != exchange.ID || exchange.ID == 0 {
+		t.Fatalf("observed = %#v, exchange ID = %d", observed, exchange.ID)
+	}
+}
+
+func TestProxyQueuesAndStoresInScopeWithWinningRule(t *testing.T) {
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(target.Close)
+	targetURL := mustParseURL(t, target.URL)
+	rules, err := scope.Compile(7, []scope.Rule{{
+		ID: 42, Enabled: true, Action: scope.ActionInclude, HostPattern: targetURL.Hostname(),
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	queue := intercept.NewQueue(time.Second)
+	controller := intercept.NewController(queue, true, []intercept.Rule{{Enabled: true}})
+	mem := &memoryStore{}
+	observer := &recordingTargetObserver{store: mem}
+	srv := NewServer(Config{
+		Store: mem, BodyLimitBytes: 1024, Intercept: controller,
+		Scope: scope.NewManager(rules), Target: observer,
+	})
+	proxyServer := httptest.NewServer(http.HandlerFunc(srv.handleHTTP))
+	t.Cleanup(proxyServer.Close)
+	client := &http.Client{Transport: &http.Transport{Proxy: http.ProxyURL(mustParseURL(t, proxyServer.URL))}}
+	t.Cleanup(client.CloseIdleConnections)
+
+	responses := make(chan *http.Response, 1)
+	errs := make(chan error, 1)
+	go func() {
+		response, err := client.Get(target.URL + "/included")
+		if err != nil {
+			errs <- err
+			return
+		}
+		responses <- response
+	}()
+	item := waitForIntercept(t, queue)
+	if err := queue.Forward(item.ID, intercept.RequestEdit{}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-errs:
+		t.Fatal(err)
+	case response := <-responses:
+		defer response.Body.Close()
+		if response.StatusCode != http.StatusNoContent {
+			t.Fatalf("status = %d", response.StatusCode)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("forwarded request did not complete")
+	}
+
+	exchange := waitForSavedExchanges(t, mem, 1)[0]
+	if !exchange.InScope || exchange.ScopeVersion != 7 || exchange.ScopeRuleID == nil || *exchange.ScopeRuleID != 42 {
+		t.Fatalf("exchange = %#v", exchange)
+	}
+	if !exchange.Intercepted {
+		t.Fatal("in-scope exchange was not marked intercepted")
+	}
+	observed := observer.snapshot()
+	if len(observed) != 1 || observed[0].ID != exchange.ID || exchange.ID == 0 {
+		t.Fatalf("observed = %#v, exchange ID = %d", observed, exchange.ID)
+	}
+}
+
+func TestProxyHTTPSMITMForwardsOutOfScopeWithoutIntercepting(t *testing.T) {
+	target := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(target.Close)
+	authority, err := certs.LoadOrCreateAuthority(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	rules, err := scope.Compile(4, []scope.Rule{{
+		ID: 1, Enabled: true, Action: scope.ActionInclude, HostPattern: "allowed.test",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	controller := intercept.NewController(intercept.NewQueue(time.Second), true, []intercept.Rule{{Enabled: true}})
+	mem := &memoryStore{}
+	observer := &recordingTargetObserver{store: mem}
+	upstream := target.Client().Transport.(*http.Transport).Clone()
+	upstreamTLS := upstream.TLSClientConfig.Clone()
+	upstreamTLS.ServerName = "example.com"
+	upstream.TLSClientConfig = upstreamTLS
+	srv := NewServer(Config{
+		Store: mem, BodyLimitBytes: 1024, Transport: upstream,
+		Authority: authority, Intercept: controller, Scope: scope.NewManager(rules), Target: observer,
+	})
+	listener := listenForTest(t)
+	t.Cleanup(func() { _ = listener.Close() })
+	go func() { _ = srv.Serve(listener) }()
+	client := proxyClient(listener.Addr().String(), authority)
+	t.Cleanup(client.CloseIdleConnections)
+
+	response, err := client.Get(strings.Replace(target.URL, "127.0.0.1", "localhost", 1) + "/outside")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", response.StatusCode)
+	}
+	if len(controller.Queue().List()) != 0 {
+		t.Fatal("out-of-scope HTTPS request entered intercept queue")
+	}
+	exchange := waitForSavedExchanges(t, mem, 1)[0]
+	if exchange.InScope || exchange.ScopeVersion != 4 || exchange.ScopeRuleID != nil || exchange.Scheme != "https" {
+		t.Fatalf("exchange = %#v", exchange)
+	}
+	observed := observer.snapshot()
+	if len(observed) != 1 || observed[0].ID != exchange.ID {
+		t.Fatalf("observed = %#v, exchange ID = %d", observed, exchange.ID)
+	}
+}
+
+func TestProxyNilScopeFailsClosedWhileForwardingAndStoring(t *testing.T) {
+	mem := &memoryStore{}
+	srv := NewServer(Config{Store: mem, BodyLimitBytes: 1024})
+	response := serveRequestThroughProxy(t, srv, outOfScopeTargetURL(t))
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", response.StatusCode)
+	}
+	exchange := waitForSavedExchanges(t, mem, 1)[0]
+	if exchange.InScope || exchange.ScopeVersion != 0 || exchange.ScopeRuleID != nil {
+		t.Fatalf("exchange = %#v", exchange)
+	}
+}
+
+func TestProxyPreparationFailureStoresCaptureTimeScopeDecision(t *testing.T) {
+	rules, err := scope.Compile(11, []scope.Rule{{
+		ID: 5, Enabled: true, Action: scope.ActionInclude, HostPattern: "example.test",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mem := &memoryStore{}
+	observer := &recordingTargetObserver{store: mem}
+	srv := NewServer(Config{
+		Store: mem, BodyLimitBytes: 1024,
+		Intercept: intercept.NewController(intercept.NewQueue(time.Second), true, []intercept.Rule{{Enabled: true}}),
+		Scope:     scope.NewManager(rules), Target: observer,
+	})
+	request := httptest.NewRequest(http.MethodPost, "http://example.test/fail", nil)
+	request.Body = errorReadCloser{err: errors.New("request body failed")}
+	recorder := httptest.NewRecorder()
+
+	srv.handleHTTP(recorder, request)
+
+	if recorder.Code != http.StatusGatewayTimeout {
+		t.Fatalf("status = %d", recorder.Code)
+	}
+	exchange := waitForSavedExchanges(t, mem, 1)[0]
+	assertScopeDecision(t, exchange, true, 11, 5)
+	if !exchange.Error || !strings.Contains(exchange.ErrorMessage, "request body failed") {
+		t.Fatalf("exchange = %#v", exchange)
+	}
+	if observed := observer.snapshot(); len(observed) != 1 || observed[0].ID != exchange.ID {
+		t.Fatalf("observed = %#v, exchange ID = %d", observed, exchange.ID)
+	}
+}
+
+func TestProxyUpstreamFailureStoresCaptureTimeScopeDecision(t *testing.T) {
+	mem := &memoryStore{}
+	observer := &recordingTargetObserver{store: mem}
+	srv := NewServer(Config{
+		Store: mem, BodyLimitBytes: 1024, Scope: scopeManagerForURL(t, "http://missing.invalid", 12, 6),
+		Target: observer,
+		Transport: roundTripperFunc(func(*http.Request) (*http.Response, error) {
+			return nil, errors.New("dns lookup failed")
+		}),
+	})
+	recorder := httptest.NewRecorder()
+	srv.handleHTTP(recorder, httptest.NewRequest(http.MethodGet, "http://missing.invalid/path", nil))
+
+	if recorder.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d", recorder.Code)
+	}
+	exchange := waitForSavedExchanges(t, mem, 1)[0]
+	assertScopeDecision(t, exchange, true, 12, 6)
+	if observed := observer.snapshot(); len(observed) != 1 || observed[0].ID != exchange.ID {
+		t.Fatalf("observed = %#v, exchange ID = %d", observed, exchange.ID)
+	}
+}
+
+func TestProxyScopeObserverFailureDoesNotChangeResponseOrLeakError(t *testing.T) {
+	var logs bytes.Buffer
+	previousLogWriter := log.Writer()
+	log.SetOutput(&logs)
+	t.Cleanup(func() { log.SetOutput(previousLogWriter) })
+	srv := NewServer(Config{
+		Store: &memoryStore{}, BodyLimitBytes: 1024,
+		Target: targetObserverFunc(func(context.Context, *store.Exchange) error {
+			return errors.New("secret request body")
+		}),
+	})
+
+	response := serveRequestThroughProxy(t, srv, outOfScopeTargetURL(t))
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", response.StatusCode)
+	}
+	if strings.Contains(logs.String(), "secret request body") {
+		t.Fatalf("observer error leaked into logs: %q", logs.String())
+	}
+}
 
 func TestHTTPProxyCapturesExchange(t *testing.T) {
 	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -215,7 +456,10 @@ func TestHTTPProxyInterceptBlocksUntilForward(t *testing.T) {
 
 	queue := intercept.NewQueue(2 * time.Second)
 	controller := intercept.NewController(queue, true, []intercept.Rule{{Enabled: true}})
-	srv := NewServer(Config{Store: store.NewMemoryForTests(), BodyLimitBytes: 1024, Intercept: controller})
+	srv := NewServer(Config{
+		Store: store.NewMemoryForTests(), BodyLimitBytes: 1024, Intercept: controller,
+		Scope: scopeManagerForURL(t, target.URL, 1, 1),
+	})
 	ln := listenForTest(t)
 	defer ln.Close()
 	go func() { _ = srv.Serve(ln) }()
@@ -272,9 +516,13 @@ func TestHTTPSProxyInterceptBlocksUntilDrop(t *testing.T) {
 	upstream := target.Client().Transport.(*http.Transport).Clone()
 	queue := intercept.NewQueue(2 * time.Second)
 	controller := intercept.NewController(queue, true, []intercept.Rule{{Enabled: true}})
+	mem := &memoryStore{}
+	observer := &recordingTargetObserver{store: mem}
+	baseURL := strings.Replace(target.URL, "127.0.0.1", "localhost", 1)
 	srv := NewServer(Config{
-		Store: store.NewMemoryForTests(), BodyLimitBytes: 1024, Authority: authority,
-		Transport: upstream, Intercept: controller,
+		Store: mem, BodyLimitBytes: 1024, Authority: authority,
+		Transport: upstream, Intercept: controller, Scope: scopeManagerForURL(t, baseURL, 3, 9),
+		Target: observer,
 	})
 	ln := listenForTest(t)
 	defer ln.Close()
@@ -284,7 +532,7 @@ func TestHTTPSProxyInterceptBlocksUntilDrop(t *testing.T) {
 	response := make(chan *http.Response, 1)
 	errs := make(chan error, 1)
 	go func() {
-		resp, err := client.Get(strings.Replace(target.URL, "127.0.0.1", "localhost", 1) + "/drop")
+		resp, err := client.Get(baseURL + "/drop")
 		if err != nil {
 			errs <- err
 			return
@@ -309,6 +557,14 @@ func TestHTTPSProxyInterceptBlocksUntilDrop(t *testing.T) {
 	}
 	if targetCalls.Load() != 0 {
 		t.Fatalf("target calls = %d", targetCalls.Load())
+	}
+	exchange := waitForSavedExchanges(t, mem, 1)[0]
+	if !exchange.InScope || exchange.ScopeVersion != 3 || exchange.ScopeRuleID == nil || *exchange.ScopeRuleID != 9 {
+		t.Fatalf("exchange = %#v", exchange)
+	}
+	observed := observer.snapshot()
+	if len(observed) != 1 || observed[0].ID != exchange.ID {
+		t.Fatalf("observed = %#v, exchange ID = %d", observed, exchange.ID)
 	}
 }
 
@@ -521,6 +777,48 @@ func TestCapturingReadCloserStreamsAndBoundsCapture(t *testing.T) {
 	}
 }
 
+func serveRequestThroughProxy(t *testing.T, srv *Server, targetURL string) *http.Response {
+	t.Helper()
+	proxyServer := httptest.NewServer(http.HandlerFunc(srv.handleHTTP))
+	t.Cleanup(proxyServer.Close)
+	client := &http.Client{Transport: &http.Transport{Proxy: http.ProxyURL(mustParseURL(t, proxyServer.URL))}}
+	t.Cleanup(client.CloseIdleConnections)
+	response, err := client.Get(targetURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = response.Body.Close() })
+	return response
+}
+
+func outOfScopeTargetURL(t *testing.T) string {
+	t.Helper()
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(target.Close)
+	return target.URL + "/outside"
+}
+
+func scopeManagerForURL(t *testing.T, rawURL string, version, ruleID int64) *scope.Manager {
+	t.Helper()
+	targetURL := mustParseURL(t, rawURL)
+	rules, err := scope.Compile(version, []scope.Rule{{
+		ID: ruleID, Enabled: true, Action: scope.ActionInclude, HostPattern: targetURL.Hostname(),
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return scope.NewManager(rules)
+}
+
+func assertScopeDecision(t *testing.T, exchange *store.Exchange, inScope bool, version, ruleID int64) {
+	t.Helper()
+	if exchange.InScope != inScope || exchange.ScopeVersion != version || exchange.ScopeRuleID == nil || *exchange.ScopeRuleID != ruleID {
+		t.Fatalf("scope decision = in:%t version:%d rule:%v", exchange.InScope, exchange.ScopeVersion, exchange.ScopeRuleID)
+	}
+}
+
 func mustParseURL(t *testing.T, rawURL string) *url.URL {
 	t.Helper()
 	parsed, err := url.Parse(rawURL)
@@ -576,6 +874,24 @@ func (fn roundTripperFunc) RoundTrip(request *http.Request) (*http.Response, err
 	return fn(request)
 }
 
+type targetObserverFunc func(context.Context, *store.Exchange) error
+
+func (fn targetObserverFunc) Observe(ctx context.Context, exchange *store.Exchange) error {
+	return fn(ctx, exchange)
+}
+
+type errorReadCloser struct {
+	err error
+}
+
+func (r errorReadCloser) Read([]byte) (int, error) {
+	return 0, r.err
+}
+
+func (errorReadCloser) Close() error {
+	return nil
+}
+
 type countingListener struct {
 	net.Listener
 	accepted atomic.Int32
@@ -597,6 +913,9 @@ type memoryStore struct {
 func (s *memoryStore) SaveExchange(_ context.Context, exchange *store.Exchange) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if exchange.ID == 0 {
+		exchange.ID = int64(len(s.saved) + 1)
+	}
 	s.saved = append(s.saved, exchange)
 	return nil
 }
@@ -631,4 +950,31 @@ func (s *memoryStore) GetExchange(context.Context, int64) (*store.Exchange, erro
 
 func (s *memoryStore) Close() error {
 	return nil
+}
+
+type recordingTargetObserver struct {
+	mu       sync.Mutex
+	store    *memoryStore
+	observed []*store.Exchange
+}
+
+func (o *recordingTargetObserver) Observe(_ context.Context, exchange *store.Exchange) error {
+	if exchange.ID == 0 {
+		return errors.New("exchange observed before persistence assigned an ID")
+	}
+	saved := o.store.snapshot()
+	if len(saved) == 0 || saved[len(saved)-1].ID != exchange.ID {
+		return errors.New("exchange observed before persistence completed")
+	}
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	copy := *exchange
+	o.observed = append(o.observed, &copy)
+	return nil
+}
+
+func (o *recordingTargetObserver) snapshot() []*store.Exchange {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return append([]*store.Exchange(nil), o.observed...)
 }

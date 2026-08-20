@@ -22,6 +22,7 @@ import (
 	"github.com/lutzifer/burpsuite-clone/internal/certs"
 	"github.com/lutzifer/burpsuite-clone/internal/events"
 	"github.com/lutzifer/burpsuite-clone/internal/intercept"
+	"github.com/lutzifer/burpsuite-clone/internal/scope"
 	"github.com/lutzifer/burpsuite-clone/internal/store"
 )
 
@@ -31,6 +32,10 @@ const (
 	defaultStreamIdleTimeout = 2 * time.Minute
 )
 
+type TargetObserver interface {
+	Observe(context.Context, *store.Exchange) error
+}
+
 type Config struct {
 	Store             store.Store
 	BodyLimitBytes    int64
@@ -39,6 +44,8 @@ type Config struct {
 	Events            *events.Hub
 	Intercept         *intercept.Controller
 	StreamIdleTimeout time.Duration
+	Scope             *scope.Manager
+	Target            TargetObserver
 }
 
 type Server struct {
@@ -53,6 +60,7 @@ type preparedRequest struct {
 	intercepted bool
 	dropped     bool
 	droppedBody []byte
+	decision    scope.Decision
 }
 
 func NewServer(cfg Config) *Server {
@@ -104,9 +112,10 @@ func (s *Server) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	startedAt := time.Now().UTC()
-	prepared, err := s.prepareRequest(r)
+	decision := s.classify(r)
+	prepared, err := s.prepareRequest(r, decision)
 	if err != nil {
-		s.savePreparationFailure(r, startedAt, err)
+		s.savePreparationFailure(r, decision, startedAt, err)
 		http.Error(w, "intercept request", http.StatusGatewayTimeout)
 		return
 	}
@@ -204,9 +213,10 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) forwardHTTPS(client net.Conn, request *http.Request) bool {
 	startedAt := time.Now().UTC()
-	prepared, err := s.prepareRequest(request)
+	decision := s.classify(request)
+	prepared, err := s.prepareRequest(request, decision)
 	if err != nil {
-		s.savePreparationFailure(request, startedAt, err)
+		s.savePreparationFailure(request, decision, startedAt, err)
 		return writeTunnelError(client, request, http.StatusGatewayTimeout, "intercept request")
 	}
 	if prepared.dropped {
@@ -236,14 +246,25 @@ func (s *Server) forwardHTTPS(client net.Conn, request *http.Request) bool {
 	return writeErr == nil && !request.Close && !response.Close
 }
 
-func (s *Server) prepareRequest(request *http.Request) (*preparedRequest, error) {
-	if s.cfg.Intercept == nil || !s.cfg.Intercept.Matches(intercept.MatchRequest{
+func (s *Server) classify(request *http.Request) scope.Decision {
+	if s.cfg.Scope == nil {
+		return scope.Decision{InScope: false, Reason: "no_include"}
+	}
+	return s.cfg.Scope.Current().Classify(scope.Target{
+		Scheme: request.URL.Scheme,
+		Host:   request.URL.Host,
+		Path:   request.URL.Path,
+	})
+}
+
+func (s *Server) prepareRequest(request *http.Request, captureDecision scope.Decision) (*preparedRequest, error) {
+	if !captureDecision.InScope || s.cfg.Intercept == nil || !s.cfg.Intercept.Matches(intercept.MatchRequest{
 		Method: request.Method,
 		Host:   request.URL.Host,
 		Path:   request.URL.Path,
 		MIME:   request.Header.Get("Content-Type"),
 	}) {
-		return prepareStreamingRequest(request, s.cfg.BodyLimitBytes), nil
+		return prepareStreamingRequest(request, s.cfg.BodyLimitBytes, captureDecision), nil
 	}
 
 	body, tooLarge, err := readInterceptBody(request.Body, s.cfg.BodyLimitBytes)
@@ -252,7 +273,7 @@ func (s *Server) prepareRequest(request *http.Request) (*preparedRequest, error)
 	}
 	if tooLarge {
 		request.Body = &prefixReadCloser{Reader: io.MultiReader(bytes.NewReader(body), request.Body), closer: request.Body}
-		return prepareStreamingRequest(request, s.cfg.BodyLimitBytes), nil
+		return prepareStreamingRequest(request, s.cfg.BodyLimitBytes, captureDecision), nil
 	}
 	_ = request.Body.Close()
 
@@ -264,21 +285,22 @@ func (s *Server) prepareRequest(request *http.Request) (*preparedRequest, error)
 		Body:         body,
 		BodyEditable: isTextSafe(request.Header.Get("Content-Type"), body),
 	}
-	decision, err := s.cfg.Intercept.Queue().Enqueue(request.Context(), item)
+	interceptDecision, err := s.cfg.Intercept.Queue().Enqueue(request.Context(), item)
 	if err != nil {
 		return nil, err
 	}
-	if decision.Action == intercept.ActionDrop {
+	if interceptDecision.Action == intercept.ActionDrop {
 		return &preparedRequest{
 			headers: request.Header.Clone(), intercepted: true, dropped: true, droppedBody: body,
+			decision: captureDecision,
 		}, nil
 	}
 
-	method := decision.Edit.Method
+	method := interceptDecision.Edit.Method
 	if method == "" {
 		method = item.Method
 	}
-	rawURL := decision.Edit.URL
+	rawURL := interceptDecision.Edit.URL
 	if rawURL == "" {
 		rawURL = item.URL
 	}
@@ -286,13 +308,13 @@ func (s *Server) prepareRequest(request *http.Request) (*preparedRequest, error)
 	if err != nil || parsedURL.Scheme == "" || parsedURL.Host == "" {
 		return nil, fmt.Errorf("invalid intercepted request URL")
 	}
-	headers := decision.Edit.Headers
+	headers := interceptDecision.Edit.Headers
 	if headers == nil {
 		headers = item.Headers
 	}
 	editedBody := body
-	if item.BodyEditable && (decision.Edit.BodySet || decision.Edit.Body != nil) {
-		editedBody = decision.Edit.Body
+	if item.BodyEditable && (interceptDecision.Edit.BodySet || interceptDecision.Edit.Body != nil) {
+		editedBody = interceptDecision.Edit.Body
 	}
 	forward := request.Clone(request.Context())
 	forward.Method = method
@@ -304,17 +326,20 @@ func (s *Server) prepareRequest(request *http.Request) (*preparedRequest, error)
 	forward.Body = capture
 	forward.ContentLength = int64(len(editedBody))
 	stripHopByHopHeaders(forward.Header)
-	return &preparedRequest{forward: forward, capture: capture, headers: cloneHeaders(headers), intercepted: true}, nil
+	return &preparedRequest{
+		forward: forward, capture: capture, headers: cloneHeaders(headers), intercepted: true,
+		decision: captureDecision,
+	}, nil
 }
 
-func prepareStreamingRequest(request *http.Request, bodyLimit int64) *preparedRequest {
+func prepareStreamingRequest(request *http.Request, bodyLimit int64, decision scope.Decision) *preparedRequest {
 	capture := newCapturingReadCloser(request.Body, bodyLimit)
 	forward := request.Clone(request.Context())
 	forward.RequestURI = ""
 	forward.Header = request.Header.Clone()
 	forward.Body = capture
 	stripHopByHopHeaders(forward.Header)
-	return &preparedRequest{forward: forward, capture: capture, headers: request.Header.Clone()}
+	return &preparedRequest{forward: forward, capture: capture, headers: request.Header.Clone(), decision: decision}
 }
 
 func readInterceptBody(body io.ReadCloser, limit int64) ([]byte, bool, error) {
@@ -361,11 +386,12 @@ func (s *Server) saveRoundTripFailure(prepared *preparedRequest, startedAt time.
 	s.saveExchange(exchange)
 }
 
-func (s *Server) savePreparationFailure(request *http.Request, startedAt time.Time, operationErr error) {
+func (s *Server) savePreparationFailure(request *http.Request, decision scope.Decision, startedAt time.Time, operationErr error) {
 	s.saveExchange(&store.Exchange{
 		Method: request.Method, Scheme: request.URL.Scheme, Host: request.URL.Host,
 		Path: request.URL.Path, Query: request.URL.RawQuery, Duration: time.Since(startedAt),
 		StartedAt: startedAt, Error: true, ErrorMessage: operationErr.Error(),
+		InScope: decision.InScope, ScopeVersion: decision.Version, ScopeRuleID: decision.RuleID,
 		Request: store.RequestData{Headers: request.Header.Clone()},
 	})
 }
@@ -375,6 +401,7 @@ func (s *Server) saveDroppedExchange(request *http.Request, prepared *preparedRe
 		Method: request.Method, Scheme: request.URL.Scheme, Host: request.URL.Host,
 		Path: request.URL.Path, Query: request.URL.RawQuery, Duration: time.Since(startedAt),
 		StartedAt: startedAt, Intercepted: true, Error: true, ErrorMessage: "request dropped by operator",
+		InScope: prepared.decision.InScope, ScopeVersion: prepared.decision.Version, ScopeRuleID: prepared.decision.RuleID,
 		RequestSize: int64(len(prepared.droppedBody)),
 		Request:     store.RequestData{Headers: prepared.headers, Body: append([]byte(nil), prepared.droppedBody...)},
 	})
@@ -386,6 +413,7 @@ func (s *Server) exchangeFromPrepared(prepared *preparedRequest, startedAt time.
 		Method: request.Method, Scheme: request.URL.Scheme, Host: request.URL.Host,
 		Path: request.URL.Path, Query: request.URL.RawQuery, Duration: time.Since(startedAt),
 		StartedAt: startedAt, Intercepted: prepared.intercepted,
+		InScope: prepared.decision.InScope, ScopeVersion: prepared.decision.Version, ScopeRuleID: prepared.decision.RuleID,
 		Request: store.RequestData{Headers: prepared.headers},
 	}
 }
@@ -406,6 +434,11 @@ func (s *Server) saveExchange(exchange *store.Exchange) {
 				"path": exchange.Path, "status": exchange.Status,
 			},
 		})
+	}
+	if s.cfg.Target != nil {
+		if err := s.cfg.Target.Observe(context.Background(), exchange); err != nil {
+			log.Printf("proxy: project exchange %d: failed", exchange.ID)
+		}
 	}
 }
 

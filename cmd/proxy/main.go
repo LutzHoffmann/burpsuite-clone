@@ -18,7 +18,9 @@ import (
 	"github.com/lutzifer/burpsuite-clone/internal/intercept"
 	"github.com/lutzifer/burpsuite-clone/internal/proxy"
 	"github.com/lutzifer/burpsuite-clone/internal/repeater"
+	"github.com/lutzifer/burpsuite-clone/internal/scope"
 	"github.com/lutzifer/burpsuite-clone/internal/store"
+	"github.com/lutzifer/burpsuite-clone/internal/target"
 )
 
 func main() {
@@ -32,12 +34,28 @@ func main() {
 		log.Fatal(err)
 	}
 	defer history.Close()
+	scopeState, err := history.LoadScopeState(context.Background())
+	if err != nil {
+		log.Fatalf("load scope state: %v", err)
+	}
+	compiledScope, err := scope.Compile(scopeState.Version, scopeState.Rules)
+	if err != nil {
+		log.Fatalf("compile scope rules: %v", err)
+	}
+	scopeManager := scope.NewManager(compiledScope)
+	hub := events.NewHub()
+	targetService := target.NewService(history, scopeManager, hub, target.Limits{
+		MaxJSONDepth: 16, MaxFields: 1000, MaxMultipartFields: 100,
+	})
+	if err := targetService.Recover(context.Background()); err != nil {
+		log.Fatalf("recover target service: %v", err)
+	}
+	defer targetService.Close()
 
 	authority, err := certs.LoadOrCreateAuthority(filepath.Join(cfg.DataDir, "ca"))
 	if err != nil {
 		log.Fatal(err)
 	}
-	hub := events.NewHub()
 	queue := intercept.NewQueue(cfg.InterceptTimeout)
 	interceptState := intercept.ControllerState{
 		Enabled: false,
@@ -63,6 +81,8 @@ func main() {
 		Authority:      authority,
 		Events:         hub,
 		Intercept:      interceptController,
+		Scope:          scopeManager,
+		Target:         targetService,
 	})
 	go func() {
 		if err := proxyServer.Serve(proxyListener); err != nil && err != http.ErrServerClosed {
