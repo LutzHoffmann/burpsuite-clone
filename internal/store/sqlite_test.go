@@ -1021,6 +1021,81 @@ func TestSQLiteTargetParameterQueryUsesOneActiveGenerationSnapshot(t *testing.T)
 	}
 }
 
+func TestSQLiteTargetForeignKeysEnabledOnEveryConnection(t *testing.T) {
+	repository := openTestStore(t)
+	repository.db.SetMaxOpenConns(4)
+	ctx := context.Background()
+
+	connections := make([]*sql.Conn, 0, 3)
+	for index := 0; index < 3; index++ {
+		connection, err := repository.db.Conn(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		connections = append(connections, connection)
+		var enabled int
+		if err := connection.QueryRowContext(ctx, `PRAGMA foreign_keys`).Scan(&enabled); err != nil {
+			t.Fatal(err)
+		}
+		if enabled != 1 {
+			t.Errorf("connection %d foreign_keys = %d, want 1", index, enabled)
+		}
+	}
+	for _, connection := range connections {
+		if err := connection.Close(); err != nil {
+			t.Error(err)
+		}
+	}
+}
+
+func TestSQLiteTargetForeignKeyRejectsOrphanGeneration(t *testing.T) {
+	repository := openTestStore(t)
+	_, err := repository.db.Exec(`
+		INSERT INTO target_generations (
+			project_id, scope_version, status, processed, total, error, started_at_unix_nano
+		) VALUES (999, 1, 'building', 0, 0, '', 1)`)
+	if err == nil {
+		t.Fatal("inserted target generation for a missing project")
+	}
+}
+
+func TestSQLiteTargetForeignKeyGenerationDeleteCascades(t *testing.T) {
+	repository := openTestStore(t)
+	ctx := context.Background()
+	generationID, err := repository.CreateTargetGeneration(ctx, 12, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	observation := TargetObservation{
+		Key:        TargetEndpointKey{Scheme: "https", Host: "example.test", Port: 443, Path: "/cascade", Method: "GET"},
+		ExchangeID: saveTargetExchange(t, repository), StartedAt: time.Unix(12, 0), Status: 200,
+		Parameters: []TargetParameter{{Location: "query", Name: "page", ValueType: "string"}},
+	}
+	if err := repository.UpsertTargetObservation(ctx, generationID, observation); err != nil {
+		t.Fatal(err)
+	}
+	var endpointID int64
+	if err := repository.db.QueryRow(`SELECT id FROM target_endpoints WHERE generation_id = ?`, generationID).Scan(&endpointID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repository.db.Exec(`DELETE FROM target_generations WHERE id = ?`, generationID); err != nil {
+		t.Fatal(err)
+	}
+	for table, query := range map[string]string{
+		"endpoints":  `SELECT COUNT(*) FROM target_endpoints WHERE id = ?`,
+		"references": `SELECT COUNT(*) FROM target_endpoint_exchanges WHERE endpoint_id = ?`,
+		"parameters": `SELECT COUNT(*) FROM target_parameters WHERE endpoint_id = ?`,
+	} {
+		var count int64
+		if err := repository.db.QueryRow(query, endpointID).Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		if count != 0 {
+			t.Errorf("cascade left %d %s rows", count, table)
+		}
+	}
+}
+
 func saveTargetExchange(t *testing.T, repository *SQLiteStore) int64 {
 	t.Helper()
 	return saveTargetExchangeAt(t, repository, time.Unix(1, 0), 200, false)
