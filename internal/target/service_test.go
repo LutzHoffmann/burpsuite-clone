@@ -125,6 +125,105 @@ func TestServiceRebuildFailurePreservesActiveGenerationAndRetry(t *testing.T) {
 	}
 }
 
+func TestServiceFailedRebuildRejectsWritesToStaleActiveGeneration(t *testing.T) {
+	sqlite := openTargetRepository(t)
+	saveExchange(t, sqlite, "https", "example.test", "/old", "")
+	repository := newControlledRepository(sqlite)
+	service := newRecoveredService(t, repository, sqlite, events.NewHub())
+	replaceRulesAndWait(t, service, 0, includeRule("example.test", "/old"))
+
+	repository.setPageFailure(errors.New("history page unavailable"))
+	if _, err := service.ReplaceRules(context.Background(), 1, includeRule("example.test", "/new")); err != nil {
+		t.Fatal(err)
+	}
+	waitForRebuildStatus(t, service, "failed")
+	late := saveScopedExchange(t, sqlite, "example.test", "/old/late", true, 1)
+	if err := service.Observe(context.Background(), late); err != nil {
+		t.Fatal(err)
+	}
+	tree, err := service.Tree(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if treeHasPath(tree, "late") {
+		t.Fatalf("stale active generation accepted observation after failed rebuild: %#v", tree)
+	}
+}
+
+func TestServiceProgressPersistenceErrorFailsRebuild(t *testing.T) {
+	sqlite := openTargetRepository(t)
+	saveExchange(t, sqlite, "https", "example.test", "/api", "")
+	repository := newControlledRepository(sqlite)
+	repository.setProgressFailures(errors.New("progress unavailable"))
+	hub := events.NewHub()
+	subscriber, unsubscribe := hub.Subscribe()
+	defer unsubscribe()
+	service := newRecoveredService(t, repository, sqlite, hub)
+
+	if _, err := service.ReplaceRules(context.Background(), 0, includeRule("example.test", "/")); err != nil {
+		t.Fatal(err)
+	}
+	waitForRebuildWorker(t, service)
+	status, err := service.RebuildStatus(context.Background())
+	if err != nil || status.Status != "failed" {
+		t.Fatalf("status = %#v, err = %v", status, err)
+	}
+	received := collectUntilEvent(t, subscriber, "target.rebuild.failed")
+	if received[len(received)-1].Data != status {
+		t.Fatalf("failed event = %#v, status = %#v", received[len(received)-1].Data, status)
+	}
+}
+
+func TestServiceFailureMarkRetriesTransientContention(t *testing.T) {
+	sqlite := openTargetRepository(t)
+	saveExchange(t, sqlite, "https", "example.test", "/api", "")
+	repository := newControlledRepository(sqlite)
+	repository.setPageFailure(errors.New("history page unavailable"))
+	repository.setFailureMarkFailures(sqliteBusyTestError{})
+	hub := events.NewHub()
+	subscriber, unsubscribe := hub.Subscribe()
+	defer unsubscribe()
+	service := newRecoveredService(t, repository, sqlite, hub)
+
+	if _, err := service.ReplaceRules(context.Background(), 0, includeRule("example.test", "/")); err != nil {
+		t.Fatal(err)
+	}
+	waitForRebuildWorker(t, service)
+	status, err := service.RebuildStatus(context.Background())
+	if err != nil || status.Status != "failed" || repository.failureMarkAttemptCount() < 2 {
+		t.Fatalf("status = %#v, attempts = %d, err = %v", status, repository.failureMarkAttemptCount(), err)
+	}
+	received := collectUntilEvent(t, subscriber, "target.rebuild.failed")
+	if received[len(received)-1].Data != status {
+		t.Fatalf("failed event = %#v, status = %#v", received[len(received)-1].Data, status)
+	}
+}
+
+func TestServiceFailureMarkPermanentErrorRemainsObservable(t *testing.T) {
+	sqlite := openTargetRepository(t)
+	saveExchange(t, sqlite, "https", "example.test", "/api", "")
+	repository := newControlledRepository(sqlite)
+	repository.setPageFailure(errors.New("history page unavailable"))
+	repository.setPermanentFailureMarkError(errors.New("repository rejected secret-body"))
+	hub := events.NewHub()
+	subscriber, unsubscribe := hub.Subscribe()
+	defer unsubscribe()
+	service := newRecoveredService(t, repository, sqlite, hub)
+
+	if _, err := service.ReplaceRules(context.Background(), 0, includeRule("example.test", "/")); err != nil {
+		t.Fatal(err)
+	}
+	waitForRebuildWorker(t, service)
+	status, err := service.RebuildStatus(context.Background())
+	if err != nil || status.Status != "failed" || strings.Contains(status.Error, "secret-body") {
+		t.Fatalf("status = %#v, err = %v", status, err)
+	}
+	received := collectUntilEvent(t, subscriber, "target.rebuild.failed")
+	if received[len(received)-1].Data != status {
+		t.Fatalf("failed event = %#v, status = %#v", received[len(received)-1].Data, status)
+	}
+}
+
 func TestServiceNewerRebuildCancelsAndWaitsForOlderWorker(t *testing.T) {
 	sqlite := openTargetRepository(t)
 	saveExchange(t, sqlite, "https", "example.test", "/api", "")
@@ -173,6 +272,46 @@ func TestServiceObserveCapturesPriorScopeExchangeCompletedDuringRebuild(t *testi
 	waitForRebuildStatus(t, service, "active")
 	tree, err := service.Tree(context.Background())
 	if err != nil || !treeHasPath(tree, "late") {
+		t.Fatalf("tree = %#v, err = %v", tree, err)
+	}
+}
+
+func TestServiceObserveReclassifiesPostCutoffExchangeAfterLosingActivationRace(t *testing.T) {
+	sqlite := openTargetRepository(t)
+	saveExchange(t, sqlite, "https", "seed.test", "/seed", "")
+	repository := newControlledRepository(sqlite)
+	service := newRecoveredService(t, repository, sqlite, events.NewHub())
+
+	pageStarted := repository.blockPages()
+	activationStarted := repository.blockActivations()
+	if _, err := service.ReplaceRules(context.Background(), 0, includeRule("example.test", "/")); err != nil {
+		t.Fatal(err)
+	}
+	waitForSignal(t, pageStarted, "rebuild page after cutoff")
+	late := saveScopedExchange(t, sqlite, "example.test", "/post-cutoff", false, 0)
+	repository.releaseBlockedPages()
+	waitForSignal(t, activationStarted, "generation activation")
+
+	observeStarted := make(chan struct{})
+	observeDone := make(chan error, 1)
+	go func() {
+		close(observeStarted)
+		observeDone <- service.Observe(context.Background(), late)
+	}()
+	waitForSignal(t, observeStarted, "post-cutoff observation")
+	select {
+	case err := <-observeDone:
+		repository.releaseBlockedActivations()
+		t.Fatalf("Observe returned before activation released the service mutex: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	repository.releaseBlockedActivations()
+	if err := <-observeDone; err != nil {
+		t.Fatal(err)
+	}
+	waitForRebuildStatus(t, service, "active")
+	tree, err := service.Tree(context.Background())
+	if err != nil || !treeHasPath(tree, "post-cutoff") {
 		t.Fatalf("tree = %#v, err = %v", tree, err)
 	}
 }
@@ -602,6 +741,17 @@ func waitForSignal(t *testing.T, signal <-chan struct{}, name string) {
 	}
 }
 
+func waitForRebuildWorker(t *testing.T, service *Service) {
+	t.Helper()
+	service.mu.Lock()
+	done := service.rebuildDone
+	service.mu.Unlock()
+	if done == nil {
+		t.Fatal("service has no rebuild worker")
+	}
+	waitForSignal(t, done, "rebuild worker")
+}
+
 func collectUntilEvent(t *testing.T, subscriber <-chan events.Event, eventType string) []events.Event {
 	t.Helper()
 	deadline := time.After(2 * time.Second)
@@ -640,19 +790,27 @@ func eventTypes(received []events.Event) []string {
 type controlledRepository struct {
 	Repository
 
-	mu             sync.Mutex
-	pageFailure    error
-	upsertFailure  error
-	blockPage      bool
-	pageStarted    chan struct{}
-	releasePage    chan struct{}
-	pageSignalOnce sync.Once
-	blockUpsert    bool
-	upsertStarted  chan struct{}
-	releaseUpsert  chan struct{}
-	upsertOnce     sync.Once
-	cancelled      []int64
-	prunes         int
+	mu                 sync.Mutex
+	pageFailure        error
+	upsertFailure      error
+	blockPage          bool
+	pageStarted        chan struct{}
+	releasePage        chan struct{}
+	pageSignalOnce     sync.Once
+	blockUpsert        bool
+	upsertStarted      chan struct{}
+	releaseUpsert      chan struct{}
+	upsertOnce         sync.Once
+	blockActivation    bool
+	activationStarted  chan struct{}
+	releaseActivation  chan struct{}
+	activationOnce     sync.Once
+	progressFailures   []error
+	markFailures       []error
+	permanentMarkError error
+	markAttempts       int
+	cancelled          []int64
+	prunes             int
 }
 
 func newControlledRepository(repository Repository) *controlledRepository {
@@ -711,6 +869,52 @@ func (r *controlledRepository) CancelTargetGeneration(ctx context.Context, gener
 	return err
 }
 
+func (r *controlledRepository) ActivateTargetGeneration(ctx context.Context, generationID int64) error {
+	r.mu.Lock()
+	block := r.blockActivation
+	started := r.activationStarted
+	release := r.releaseActivation
+	r.mu.Unlock()
+	if block {
+		r.activationOnce.Do(func() { close(started) })
+		select {
+		case <-release:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	return r.Repository.ActivateTargetGeneration(ctx, generationID)
+}
+
+func (r *controlledRepository) SetTargetGenerationProgress(ctx context.Context, generationID, processed int64) error {
+	r.mu.Lock()
+	var failure error
+	if len(r.progressFailures) > 0 {
+		failure = r.progressFailures[0]
+		r.progressFailures = r.progressFailures[1:]
+	}
+	r.mu.Unlock()
+	if failure != nil {
+		return failure
+	}
+	return r.Repository.SetTargetGenerationProgress(ctx, generationID, processed)
+}
+
+func (r *controlledRepository) FailTargetGeneration(ctx context.Context, generationID int64, generationError string) error {
+	r.mu.Lock()
+	r.markAttempts++
+	failure := r.permanentMarkError
+	if len(r.markFailures) > 0 {
+		failure = r.markFailures[0]
+		r.markFailures = r.markFailures[1:]
+	}
+	r.mu.Unlock()
+	if failure != nil {
+		return failure
+	}
+	return r.Repository.FailTargetGeneration(ctx, generationID, generationError)
+}
+
 func (r *controlledRepository) PruneRetiredTargetGenerations(ctx context.Context) error {
 	err := r.Repository.PruneRetiredTargetGenerations(ctx)
 	if err == nil {
@@ -730,6 +934,24 @@ func (r *controlledRepository) setPageFailure(err error) {
 func (r *controlledRepository) setUpsertFailure(err error) {
 	r.mu.Lock()
 	r.upsertFailure = err
+	r.mu.Unlock()
+}
+
+func (r *controlledRepository) setProgressFailures(failures ...error) {
+	r.mu.Lock()
+	r.progressFailures = append([]error(nil), failures...)
+	r.mu.Unlock()
+}
+
+func (r *controlledRepository) setFailureMarkFailures(failures ...error) {
+	r.mu.Lock()
+	r.markFailures = append([]error(nil), failures...)
+	r.mu.Unlock()
+}
+
+func (r *controlledRepository) setPermanentFailureMarkError(err error) {
+	r.mu.Lock()
+	r.permanentMarkError = err
 	r.mu.Unlock()
 }
 
@@ -775,6 +997,24 @@ func (r *controlledRepository) releaseBlockedUpserts() {
 	close(release)
 }
 
+func (r *controlledRepository) blockActivations() <-chan struct{} {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.blockActivation = true
+	r.activationStarted = make(chan struct{})
+	r.releaseActivation = make(chan struct{})
+	r.activationOnce = sync.Once{}
+	return r.activationStarted
+}
+
+func (r *controlledRepository) releaseBlockedActivations() {
+	r.mu.Lock()
+	release := r.releaseActivation
+	r.blockActivation = false
+	r.mu.Unlock()
+	close(release)
+}
+
 func (r *controlledRepository) cancelCount() int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -786,3 +1026,14 @@ func (r *controlledRepository) pruneCount() int {
 	defer r.mu.Unlock()
 	return r.prunes
 }
+
+func (r *controlledRepository) failureMarkAttemptCount() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.markAttempts
+}
+
+type sqliteBusyTestError struct{}
+
+func (sqliteBusyTestError) Error() string { return "database is locked" }
+func (sqliteBusyTestError) Code() int     { return 5 }

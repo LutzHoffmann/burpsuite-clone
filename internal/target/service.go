@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"log"
 	"net"
 	"strconv"
 	"strings"
@@ -19,6 +20,8 @@ const (
 	rebuildPageSize         = 200
 	rebuildProgressRecords  = 100
 	rebuildProgressInterval = 250 * time.Millisecond
+	failurePersistAttempts  = 5
+	failurePersistDelay     = 5 * time.Millisecond
 )
 
 var (
@@ -49,6 +52,7 @@ type Service struct {
 	rebuildDone         chan struct{}
 	pendingGenerationID int64
 	pendingRules        *scope.RuleSet
+	failedStatus        *store.RebuildStatus
 	rebuildGenerationID int64
 	rebuildRunning      bool
 	closed              bool
@@ -128,9 +132,25 @@ func (s *Service) Observe(ctx context.Context, exchange *store.Exchange) error {
 		generationID = s.pendingGenerationID
 		rules = s.pendingRules
 		pending = true
-	} else if generationID == 0 || !exchange.InScope || exchange.ScopeVersion != s.activeScopeVersion {
-		s.mu.Unlock()
-		return nil
+	} else {
+		if generationID == 0 {
+			s.mu.Unlock()
+			return nil
+		}
+		decision := s.scope.Current().Classify(scope.Target{Scheme: exchange.Scheme, Host: exchange.Host, Path: exchange.Path})
+		if decision.Version != s.activeScopeVersion || exchange.ScopeVersion > s.activeScopeVersion {
+			s.mu.Unlock()
+			return nil
+		}
+		if exchange.ScopeVersion == s.activeScopeVersion {
+			if !exchange.InScope {
+				s.mu.Unlock()
+				return nil
+			}
+		} else if !decision.InScope {
+			s.mu.Unlock()
+			return nil
+		}
 	}
 	s.pendingObservers.Add(1)
 	s.mu.Unlock()
@@ -236,7 +256,11 @@ func (s *Service) RebuildStatus(ctx context.Context) (store.RebuildStatus, error
 	}
 	s.mu.Lock()
 	activeScopeVersion := s.activeScopeVersion
+	failedStatus := s.failedStatus
 	s.mu.Unlock()
+	if failedStatus != nil && failedStatus.ID == generation.ID {
+		return *failedStatus, nil
+	}
 	return rebuildStatus(generation, activeScopeVersion), nil
 }
 
@@ -349,6 +373,7 @@ func (s *Service) startRebuildLocked(ctx context.Context, scopeVersion int64, ru
 	done := make(chan struct{})
 	s.pendingGenerationID = generationID
 	s.pendingRules = rules
+	s.failedStatus = nil
 	s.rebuildGenerationID = generationID
 	s.rebuildCancel = cancel
 	s.rebuildDone = done
@@ -493,12 +518,47 @@ func (s *Service) failRebuild(ctx context.Context, generationID, scopeVersion, p
 }
 
 func (s *Service) markRebuildFailed(generationID, scopeVersion, processed, total int64) {
-	background := context.Background()
-	_ = s.repository.SetTargetGenerationProgress(background, generationID, processed)
-	if err := s.repository.FailTargetGeneration(background, generationID, errProjectionFailed.Error()); err != nil {
-		return
+	status := s.statusFor(generationID, scopeVersion, processed, total, "failed", errProjectionFailed.Error())
+	background, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := retryTransientContention(background, func() error {
+		return s.repository.SetTargetGenerationProgress(background, generationID, processed)
+	}); err != nil {
+		log.Printf("target generation %d final progress could not be persisted", generationID)
 	}
-	s.publish("target.rebuild.failed", s.statusFor(generationID, scopeVersion, processed, total, "failed", errProjectionFailed.Error()))
+	if err := retryTransientContention(background, func() error {
+		return s.repository.FailTargetGeneration(background, generationID, errProjectionFailed.Error())
+	}); err != nil {
+		log.Printf("target generation %d failed state could not be persisted", generationID)
+	}
+	s.mu.Lock()
+	if s.rebuildGenerationID == generationID {
+		failedStatus := status
+		s.failedStatus = &failedStatus
+	}
+	s.mu.Unlock()
+	s.publish("target.rebuild.failed", status)
+}
+
+func retryTransientContention(ctx context.Context, operation func() error) error {
+	var err error
+	for attempt := 0; attempt < failurePersistAttempts; attempt++ {
+		err = operation()
+		if err == nil || !isSQLiteBusy(err) {
+			return err
+		}
+		if attempt == failurePersistAttempts-1 {
+			break
+		}
+		timer := time.NewTimer(failurePersistDelay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
+	return err
 }
 
 func (s *Service) drainObservers(generationID int64) {
