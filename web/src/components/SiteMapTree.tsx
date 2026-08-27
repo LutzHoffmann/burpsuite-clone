@@ -1,4 +1,4 @@
-import { useDeferredValue, useEffect, useState } from 'react';
+import { useDeferredValue, useEffect, useState, type KeyboardEvent } from 'react';
 import type { TargetTreeNode } from '../types';
 
 export type TreeFilters = {
@@ -16,7 +16,10 @@ type SiteMapTreeProps = {
   onSelect: (id: number) => void;
 };
 
+type NodeContext = { scheme: string; host: string; port: number; path: string[] };
 type VisibleNode = { node: TargetTreeNode; key: string; parentKey: string | null };
+
+const rootContext: NodeContext = { scheme: '', host: '', port: 0, path: [] };
 
 function hasStatusFamily(statuses: number[], family: string) {
   return family === 'all' || statuses.some((status) => `${Math.floor(status / 100)}xx` === family);
@@ -26,22 +29,42 @@ function hasMime(node: TargetTreeNode, mime: string) {
   return mime === 'all' || [...node.requestMimes, ...node.responseMimes].includes(mime);
 }
 
-function nodeLabel(node: TargetTreeNode) {
-  if (node.method) return `${node.method} ${node.path || '/'}`;
+function contextFor(node: TargetTreeNode, parent: NodeContext): NodeContext {
+  const path = node.path ? (node.path.startsWith('/') ? node.path.split('/').filter(Boolean) : [...parent.path, node.path]) : parent.path;
+  return { scheme: node.scheme || parent.scheme, host: node.host || parent.host, port: node.port || parent.port, path };
+}
+
+function pathLabel(context: NodeContext) {
+  return context.path.length > 0 ? `/${context.path.join('/')}` : '/';
+}
+
+function nodeLabel(node: TargetTreeNode, context: NodeContext) {
+  if (node.method) return `${node.method} ${pathLabel(context)}`;
   if (node.host) return node.port ? `${node.host}:${node.port}` : node.host;
+  if (node.path) return node.path;
   return node.scheme || 'Site map node';
 }
 
-function nodeKey(node: TargetTreeNode) {
-  return `${node.id}-${nodeLabel(node)}`;
+function nodeKey(parentKey: string | null, node: TargetTreeNode) {
+  const segment = node.method ? `endpoint:${node.method}:${node.id}` : node.host || node.scheme || node.port ? `authority:${node.scheme}:${node.host}:${node.port}` : `path:${node.path}`;
+  return `${parentKey ? `${parentKey}/` : ''}${encodeURIComponent(segment)}`;
 }
 
-function filterNodes(nodes: readonly TargetTreeNode[], filters: TreeFilters): TargetTreeNode[] {
+function itemID(key: string) {
+  return `site-map-item-${encodeURIComponent(key)}`;
+}
+
+function groupID(key: string) {
+  return `site-map-group-${encodeURIComponent(key)}`;
+}
+
+function filterNodes(nodes: readonly TargetTreeNode[], filters: TreeFilters, parentContext = rootContext): TargetTreeNode[] {
   const normalizedText = filters.text.trim().toLowerCase();
   return nodes.flatMap((node) => {
-    const children = filterNodes(node.children, filters);
+    const context = contextFor(node, parentContext);
+    const children = filterNodes(node.children, filters, context);
     const isEndpoint = Boolean(node.method);
-    const textMatches = !normalizedText || [node.scheme, node.host, node.path, node.method].join(' ').toLowerCase().includes(normalizedText);
+    const textMatches = !normalizedText || [context.scheme, context.host, pathLabel(context), node.method].join(' ').toLowerCase().includes(normalizedText);
     const scopeMatches = filters.scope === 'all' || (filters.scope === 'in' ? node.inScope : !node.inScope);
     const methodMatches = filters.method === 'all' || node.method === filters.method;
     const matches = textMatches && scopeMatches && methodMatches && hasStatusFamily(node.statuses, filters.status) && hasMime(node, filters.mime);
@@ -53,7 +76,7 @@ function filterNodes(nodes: readonly TargetTreeNode[], filters: TreeFilters): Ta
 
 function flattenExpanded(nodes: readonly TargetTreeNode[], expanded: Record<string, boolean>, parentKey: string | null = null): VisibleNode[] {
   return nodes.flatMap((node) => {
-    const key = nodeKey(node);
+    const key = nodeKey(parentKey, node);
     const visible = [{ node, key, parentKey }];
     return expanded[key] ? [...visible, ...flattenExpanded(node.children, expanded, key)] : visible;
   });
@@ -68,14 +91,14 @@ export function SiteMapTree({ nodes, selectedId, filters, onSelect }: SiteMapTre
   const currentKey = focusableNodes.some((node) => node.key === activeKey) ? activeKey : focusableNodes[0]?.key ?? null;
 
   useEffect(() => {
-    if (activeKey) document.getElementById(`site-map-item-${activeKey}`)?.focus();
+    if (activeKey) document.getElementById(itemID(activeKey))?.focus();
   }, [activeKey, expanded]);
 
   const moveFocus = (key: string | null) => {
     if (key) setActiveKey(key);
   };
 
-  const handleKeyDown = (event: React.KeyboardEvent<HTMLDivElement>, node: TargetTreeNode, key: string, parentKey: string | null) => {
+  const handleKeyDown = (event: KeyboardEvent<HTMLDivElement>, node: TargetTreeNode, key: string, parentKey: string | null) => {
     const index = focusableNodes.findIndex((item) => item.key === key);
     const expandable = node.children.length > 0;
     if (event.key === 'ArrowDown' && index < focusableNodes.length - 1) {
@@ -89,7 +112,7 @@ export function SiteMapTree({ nodes, selectedId, filters, onSelect }: SiteMapTre
     if (event.key === 'ArrowRight') {
       event.preventDefault();
       if (expandable && !expanded[key]) setExpanded({ ...expanded, [key]: true });
-      else if (expandable) moveFocus(nodeKey(node.children[0]));
+      else if (expandable) moveFocus(nodeKey(key, node.children[0]));
     }
     if (event.key === 'ArrowLeft') {
       event.preventDefault();
@@ -99,28 +122,30 @@ export function SiteMapTree({ nodes, selectedId, filters, onSelect }: SiteMapTre
     if (event.key === 'Enter' || event.key === ' ') {
       event.preventDefault();
       if (expandable) setExpanded({ ...expanded, [key]: !expanded[key] });
-      if (node.method) onSelect(node.id);
+      if (node.method && node.id !== 0) onSelect(node.id);
     }
   };
 
-  const renderNodes = (items: readonly TargetTreeNode[], depth = 0, parentKey: string | null = null) => items.map((node) => {
-    const key = nodeKey(node);
+  const renderNodes = (items: readonly TargetTreeNode[], depth = 0, parentKey: string | null = null, parentContext = rootContext) => items.map((node) => {
+    const key = nodeKey(parentKey, node);
+    const context = contextFor(node, parentContext);
     const expandable = node.children.length > 0;
-    const groupID = `site-map-group-${key}`;
-    const selected = node.id === selectedId;
+    const group = groupID(key);
+    const endpoint = node.method !== '' && node.id !== 0;
+    const selected = endpoint && node.id === selectedId;
     return <li key={key}>
       <div
-        aria-controls={expandable ? groupID : undefined}
+        aria-controls={expandable ? group : undefined}
         aria-expanded={expandable ? Boolean(expanded[key]) : undefined}
         aria-level={depth + 1}
-        aria-owns={expandable ? groupID : undefined}
+        aria-owns={expandable ? group : undefined}
         aria-selected={selected || undefined}
         className={`site-map-node ${selected ? 'selected' : ''} ${node.inScope ? '' : 'out-of-scope'}`}
-        id={`site-map-item-${key}`}
+        id={itemID(key)}
         onClick={() => {
           setActiveKey(key);
           if (expandable) setExpanded({ ...expanded, [key]: !expanded[key] });
-          if (node.method) onSelect(node.id);
+          if (endpoint) onSelect(node.id);
         }}
         onKeyDown={(event) => handleKeyDown(event, node, key, parentKey)}
         role="treeitem"
@@ -129,10 +154,10 @@ export function SiteMapTree({ nodes, selectedId, filters, onSelect }: SiteMapTre
         <span aria-hidden="true" className="tree-indent" style={{ width: `${depth * 13}px` }} />
         <span aria-hidden="true" className="tree-disclosure">{expandable ? (expanded[key] ? 'v' : '>') : '-'}</span>
         {node.method && <span className={`method method-${node.method.toLowerCase()}`}>{node.method}</span>}
-        <span>{node.method ? node.path || '/' : nodeLabel(node)}</span>
+        <span>{node.method ? pathLabel(context) : nodeLabel(node, context)}</span>
         <small aria-hidden="true">{node.count}</small>
       </div>
-      {expandable && <ul aria-labelledby={`site-map-item-${key}`} className="site-map-branch" hidden={!expanded[key]} id={groupID} role="group">{renderNodes(node.children, depth + 1, key)}</ul>}
+      {expandable && <ul aria-labelledby={itemID(key)} className="site-map-branch" hidden={!expanded[key]} id={group} role="group">{renderNodes(node.children, depth + 1, key, context)}</ul>}
     </li>;
   });
 

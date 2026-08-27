@@ -1,7 +1,12 @@
 import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import '@testing-library/jest-dom/vitest';
+// @ts-expect-error Vitest executes this test in Node, while the web build excludes Node types.
+import { readFileSync } from 'node:fs';
+import type { TargetTreeNode } from '../types';
 import { TargetWorkspace } from './TargetWorkspace';
+
+const styles = readFileSync('src/styles.css', 'utf8');
 
 const endpoint = {
   id: 7, scheme: 'https', host: 'example.test', port: 443, path: '/api/users', method: 'GET', inScope: true,
@@ -11,15 +16,32 @@ const endpoint = {
   errorSeen: false, latestExchangeId: 42,
 };
 
-const tree = [{
-  id: 1, scheme: 'https', host: 'example.test', port: 443, path: '', method: '', inScope: true, statuses: [200, 401],
-  requestMimes: ['application/json', 'text/plain'], responseMimes: ['application/json', 'text/css', 'text/html'], count: 6, lastSeen: '2026-08-20T10:05:00Z', children: [
-    { id: 7, scheme: 'https', host: 'example.test', port: 443, path: '/api/users', method: 'GET', inScope: true, statuses: [200, 401], requestMimes: ['application/json'], responseMimes: ['application/json'], count: 3, lastSeen: '2026-08-20T10:05:00Z', children: [] },
-    { id: 8, scheme: 'https', host: 'outside.test', port: 443, path: '/assets', method: 'POST', inScope: false, statuses: [404], requestMimes: ['text/plain'], responseMimes: ['text/css'], count: 1, lastSeen: '2026-08-20T10:04:00Z', children: [] },
-    { id: 9, scheme: 'https', host: 'example.test', port: 443, path: '/admin', method: 'DELETE', inScope: true, statuses: [500], requestMimes: ['application/json'], responseMimes: ['text/html'], count: 1, lastSeen: '2026-08-20T10:03:00Z', children: [] },
-    { id: 10, scheme: 'https', host: 'outside.test', port: 443, path: '/profile', method: 'PATCH', inScope: false, statuses: [201], requestMimes: ['application/json'], responseMimes: ['application/json'], count: 1, lastSeen: '2026-08-20T10:02:00Z', children: [] },
-  ],
-}];
+const tree: TargetTreeNode[] = [
+  {
+    id: 0, scheme: 'https', host: 'example.test', port: 443, path: '', method: '', inScope: true, statuses: [200, 401, 404, 500], requestMimes: ['application/json', 'text/plain'], responseMimes: ['application/json', 'text/css', 'text/html'], count: 6, lastSeen: '2026-08-20T10:05:00Z', children: [
+      { id: 0, scheme: '', host: '', port: 0, path: 'api', method: '', inScope: true, statuses: [200, 401], requestMimes: ['application/json'], responseMimes: ['application/json'], count: 3, lastSeen: '2026-08-20T10:05:00Z', children: [
+        { id: 0, scheme: '', host: '', port: 0, path: 'users', method: '', inScope: true, statuses: [200, 401], requestMimes: ['application/json'], responseMimes: ['application/json'], count: 3, lastSeen: '2026-08-20T10:05:00Z', children: [
+          { id: 7, scheme: '', host: '', port: 0, path: '', method: 'GET', inScope: true, statuses: [200, 401], requestMimes: ['application/json'], responseMimes: ['application/json'], count: 3, lastSeen: '2026-08-20T10:05:00Z', children: [] },
+        ] },
+      ] },
+      { id: 0, scheme: '', host: '', port: 0, path: 'assets', method: '', inScope: false, statuses: [404], requestMimes: ['text/plain'], responseMimes: ['text/css'], count: 1, lastSeen: '2026-08-20T10:04:00Z', children: [
+        { id: 8, scheme: '', host: '', port: 0, path: '', method: 'POST', inScope: false, statuses: [404], requestMimes: ['text/plain'], responseMimes: ['text/css'], count: 1, lastSeen: '2026-08-20T10:04:00Z', children: [] },
+      ] },
+      { id: 0, scheme: '', host: '', port: 0, path: 'admin', method: '', inScope: true, statuses: [500], requestMimes: ['application/json'], responseMimes: ['text/html'], count: 1, lastSeen: '2026-08-20T10:03:00Z', children: [
+        { id: 9, scheme: '', host: '', port: 0, path: '', method: 'DELETE', inScope: true, statuses: [500], requestMimes: ['application/json'], responseMimes: ['text/html'], count: 1, lastSeen: '2026-08-20T10:03:00Z', children: [] },
+      ] },
+    ],
+  },
+  {
+    id: 0, scheme: 'https', host: 'outside.test', port: 443, path: '', method: '', inScope: false, statuses: [201], requestMimes: ['application/json'], responseMimes: ['application/json'], count: 1, lastSeen: '2026-08-20T10:02:00Z', children: [
+      { id: 0, scheme: '', host: '', port: 0, path: 'api', method: '', inScope: false, statuses: [201], requestMimes: ['application/json'], responseMimes: ['application/json'], count: 1, lastSeen: '2026-08-20T10:02:00Z', children: [
+        { id: 0, scheme: '', host: '', port: 0, path: 'profile', method: '', inScope: false, statuses: [201], requestMimes: ['application/json'], responseMimes: ['application/json'], count: 1, lastSeen: '2026-08-20T10:02:00Z', children: [
+          { id: 10, scheme: '', host: '', port: 0, path: '', method: 'PATCH', inScope: false, statuses: [201], requestMimes: ['application/json'], responseMimes: ['application/json'], count: 1, lastSeen: '2026-08-20T10:02:00Z', children: [] },
+        ] },
+      ] },
+    ],
+  },
+];
 
 const scope = { version: 3, rules: [
   { id: 11, enabled: true, action: 'include', scheme: 'https', hostPattern: 'example.test', port: 443, pathPrefix: '/' },
@@ -28,7 +50,7 @@ const scope = { version: 3, rules: [
 const changedScope = { version: 4, rules: [{ id: 18, enabled: true, action: 'exclude', scheme: '', hostPattern: 'changed.test', port: 0, pathPrefix: '/' }] };
 const response = (value: unknown, status = 200) => new Response(JSON.stringify(value), { status, headers: { 'Content-Type': 'application/json' } });
 
-function targetFetchFixture(options: { rebuildStatus?: 'idle' | 'building' | 'failed'; tree?: typeof tree } = {}): ReturnType<typeof vi.fn> {
+function targetFetchFixture(options: { rebuildStatus?: 'idle' | 'building' | 'failed'; tree?: TargetTreeNode[] } = {}): ReturnType<typeof vi.fn> {
   const rebuild = options.rebuildStatus ?? 'idle';
   let retried = false;
   return vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -66,7 +88,17 @@ function deferred<T>() {
 }
 
 function paths(fetchMock: ReturnType<typeof vi.fn>) { return fetchMock.mock.calls.map(([input]) => new URL(String(input), 'http://localhost').pathname); }
-async function expandHost(user: ReturnType<typeof userEvent.setup>) { await user.click(await screen.findByRole('treeitem', { name: /example\.test/ })); }
+async function expandTreeItem(user: ReturnType<typeof userEvent.setup>, name: string | RegExp) {
+  const nameMatcher = typeof name === 'string' ? new RegExp(`^${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?:$| )`) : name;
+  const item = await screen.findByRole('treeitem', { name: nameMatcher });
+  if (item.getAttribute('aria-expanded') === 'false') await user.click(item);
+  return item;
+}
+async function expandExampleUsers(user: ReturnType<typeof userEvent.setup>) {
+  await expandTreeItem(user, 'example.test:443');
+  await expandTreeItem(user, 'api');
+  await expandTreeItem(user, 'users');
+}
 
 beforeEach(() => vi.stubGlobal('fetch', targetFetchFixture()));
 afterEach(() => vi.unstubAllGlobals());
@@ -74,7 +106,7 @@ afterEach(() => vi.unstubAllGlobals());
 test('loads site-map parameter metadata without values and bounds diagnostics', async () => {
   render(<TargetWorkspace refresh={{ sequence: 0, type: 'initial' }} onOpenHistory={vi.fn()} onSendToRepeater={vi.fn()} />);
   const user = userEvent.setup();
-  await expandHost(user);
+  await expandExampleUsers(user);
   await user.click(screen.getByRole('treeitem', { name: /^GET \/api\/users/ }));
   expect(await screen.findByText('user.email')).toBeInTheDocument();
   expect(screen.getByText('3 occurrences')).toBeInTheDocument();
@@ -111,20 +143,24 @@ test('renders disabled exclude rules from the server', async () => {
 test('independently filters site map text, scope, method, status family, and MIME metadata', async () => {
   render(<TargetWorkspace refresh={{ sequence: 0, type: 'initial' }} onOpenHistory={vi.fn()} onSendToRepeater={vi.fn()} />);
   const user = userEvent.setup();
-  await expandHost(user);
+  await expandTreeItem(user, 'example.test:443');
   const text = screen.getByLabelText('Filter site map');
   const scopeFilter = screen.getByLabelText('Scope filter');
   const method = screen.getByLabelText('Method filter');
   const status = screen.getByLabelText('Status filter');
   const mime = screen.getByLabelText('MIME filter');
   await user.type(text, 'assets');
+  await expandTreeItem(user, 'assets');
   await waitFor(() => expect(screen.getByRole('treeitem', { name: /^POST \/assets/ })).toBeInTheDocument());
   expect(screen.queryByRole('treeitem', { name: /^GET \/api\/users/ })).not.toBeInTheDocument();
   await user.clear(text);
   await user.selectOptions(scopeFilter, 'in');
+  await expandExampleUsers(user);
   expect(screen.getByRole('treeitem', { name: /^GET \/api\/users/ })).toBeInTheDocument();
   expect(screen.queryByRole('treeitem', { name: /^POST \/assets/ })).not.toBeInTheDocument();
   await user.selectOptions(scopeFilter, 'out');
+  await expandTreeItem(user, 'example.test:443');
+  await expandTreeItem(user, 'assets');
   expect(screen.getByRole('treeitem', { name: /^POST \/assets/ })).toBeInTheDocument();
   expect(screen.queryByRole('treeitem', { name: /^DELETE \/admin/ })).not.toBeInTheDocument();
   await user.selectOptions(scopeFilter, 'all');
@@ -133,12 +169,32 @@ test('independently filters site map text, scope, method, status family, and MIM
   expect(screen.queryByRole('treeitem', { name: /^PATCH \/profile/ })).not.toBeInTheDocument();
   await user.selectOptions(method, 'all');
   await user.selectOptions(status, '5xx');
+  await expandTreeItem(user, 'example.test:443');
+  await expandTreeItem(user, 'admin');
   expect(screen.getByRole('treeitem', { name: /^DELETE \/admin/ })).toBeInTheDocument();
   expect(screen.queryByRole('treeitem', { name: /^GET \/api\/users/ })).not.toBeInTheDocument();
   await user.selectOptions(status, 'all');
   await user.selectOptions(mime, 'text/css');
   expect(screen.getByRole('treeitem', { name: /^POST \/assets/ })).toBeInTheDocument();
   expect(screen.queryByRole('treeitem', { name: /^DELETE \/admin/ })).not.toBeInTheDocument();
+});
+
+test('derives unique tree identities from repeated zero-ID branches', async () => {
+  render(<TargetWorkspace refresh={{ sequence: 0, type: 'initial' }} onOpenHistory={vi.fn()} onSendToRepeater={vi.fn()} />);
+  const user = userEvent.setup();
+  await expandTreeItem(user, 'example.test:443');
+  await expandTreeItem(user, 'outside.test:443');
+  const apiNodes = await screen.findAllByRole('treeitem', { name: 'api' });
+  expect(apiNodes).toHaveLength(2);
+  expect(new Set(apiNodes.map((node) => node.id)).size).toBe(2);
+  expect(new Set(apiNodes.map((node) => node.getAttribute('aria-owns'))).size).toBe(2);
+  await user.click(apiNodes[1]);
+  expect(apiNodes[0]).toHaveAttribute('aria-expanded', 'false');
+  expect(apiNodes[1]).toHaveAttribute('aria-expanded', 'true');
+  expect(apiNodes.filter((node) => node.getAttribute('tabindex') === '0')).toHaveLength(1);
+  apiNodes[1].focus();
+  await user.keyboard('{ArrowRight}');
+  expect(screen.getByRole('treeitem', { name: 'profile' })).toHaveFocus();
 });
 
 test('uses owned groups and standard roving keyboard navigation in the site map', async () => {
@@ -153,15 +209,24 @@ test('uses owned groups and standard roving keyboard navigation in the site map'
   expect(document.getElementById(host.getAttribute('aria-owns')!)).toHaveAttribute('role', 'group');
   expect(within(treeElement).getByRole('group')).toBeInTheDocument();
   await user.keyboard('{ArrowDown}');
-  expect(screen.getByRole('treeitem', { name: /^GET \/api\/users/ })).toHaveFocus();
+  const api = screen.getByRole('treeitem', { name: 'api' });
+  expect(api).toHaveFocus();
+  await user.keyboard('{ArrowRight}');
+  expect(api).toHaveAttribute('aria-expanded', 'true');
   await user.keyboard('{ArrowDown}');
-  expect(screen.getByRole('treeitem', { name: /^POST \/assets/ })).toHaveFocus();
-  await user.keyboard('{ArrowUp}');
+  const users = screen.getByRole('treeitem', { name: 'users' });
+  expect(users).toHaveFocus();
+  await user.keyboard('{ArrowRight}');
+  await user.keyboard('{ArrowDown}');
   expect(screen.getByRole('treeitem', { name: /^GET \/api\/users/ })).toHaveFocus();
   await user.keyboard('{ArrowLeft}');
-  expect(host).toHaveFocus();
+  expect(users).toHaveFocus();
+  expect(users).toHaveAttribute('aria-expanded', 'true');
   await user.keyboard('{ArrowLeft}');
-  expect(host).toHaveAttribute('aria-expanded', 'false');
+  expect(users).toHaveFocus();
+  expect(users).toHaveAttribute('aria-expanded', 'false');
+  await user.keyboard('{ArrowLeft}');
+  expect(api).toHaveFocus();
 });
 
 test('loads exactly the resources required by every refresh event', async () => {
@@ -223,7 +288,7 @@ test('opens endpoint request history and sends it to repeater', async () => {
   const onSendToRepeater = vi.fn();
   render(<TargetWorkspace refresh={{ sequence: 0, type: 'initial' }} onOpenHistory={onOpenHistory} onSendToRepeater={onSendToRepeater} />);
   const user = userEvent.setup();
-  await expandHost(user);
+  await expandExampleUsers(user);
   await user.click(await screen.findByRole('treeitem', { name: /^GET \/api\/users/ }));
   await user.click(await screen.findByRole('button', { name: 'Open 42 in History' }));
   await user.click(screen.getByRole('button', { name: 'Send 42 to Repeater' }));
@@ -238,12 +303,13 @@ test('shows rebuild progress, preserves a stale tree, and retries a failed rebui
   const user = userEvent.setup();
   expect(await screen.findByText('projection failed')).toBeInTheDocument();
   expect(screen.getByText('Stale site map')).toBeInTheDocument();
-  await expandHost(user);
+  await expandExampleUsers(user);
   expect(screen.getByRole('treeitem', { name: /^GET \/api\/users/ })).toBeInTheDocument();
   await user.click(screen.getByRole('button', { name: 'Retry rebuild' }));
   await waitFor(() => expect(fetchMock).toHaveBeenCalledWith('/api/target/rebuild', expect.objectContaining({ method: 'POST' })));
   rerender(<TargetWorkspace refresh={{ sequence: 1, type: 'target.rebuild.progress' }} onOpenHistory={vi.fn()} onSendToRepeater={vi.fn()} />);
   expect(await screen.findByRole('status')).toHaveTextContent('2 / 7');
+  expect(screen.getByRole('treeitem', { name: /^GET \/api\/users/ })).toBeInTheDocument();
 });
 
 test('renders an actionable mobile-safe empty project state with landmarks', async () => {
@@ -255,4 +321,6 @@ test('renders an actionable mobile-safe empty project state with landmarks', asy
   expect(screen.getByRole('region', { name: 'Site map' })).toHaveClass('target-site-map');
   expect(screen.getByRole('region', { name: 'Endpoint details' })).toHaveClass('target-details');
   expect(document.querySelector('.target-filters')).toBeInTheDocument();
+  expect(styles).toContain('@media (max-width: 720px) { body { overflow-x: hidden; }.target-workspace { grid-column: 1; grid-template-columns: 1fr; min-width: 0; }');
+  expect(styles).toContain('.scope-editor, .target-site-map, .target-details { border-right: 0; border-bottom: 1px solid #2b3a37; overflow: visible; }');
 });
