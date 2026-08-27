@@ -37,41 +37,51 @@ export function TargetWorkspace({ refresh, onOpenHistory, onSendToRepeater }: Ta
   const [loadError, setLoadError] = useState('');
 
   useEffect(() => {
+    let current = true;
     const load = async () => {
       try {
         setLoadError('');
         if (refresh.type === 'target.rebuild.started' || refresh.type === 'target.rebuild.progress' || refresh.type === 'target.rebuild.failed') {
-          setStatus(await getRebuildStatus());
+          const nextStatus = await getRebuildStatus();
+          if (current) setStatus(nextStatus);
           return;
         }
         if (refresh.type === 'target.endpoint.updated') {
-          setTree(await getTargetTree());
+          const nextTree = await getTargetTree();
+          if (current) setTree(nextTree);
           return;
         }
         const [nextScope, nextTree, nextStatus] = await Promise.all([getScopeState(), getTargetTree(), getRebuildStatus()]);
-        setScope(nextScope);
-        setTree(nextTree);
-        setStatus(nextStatus);
+        if (current) {
+          setScope(nextScope);
+          setTree(nextTree);
+          setStatus(nextStatus);
+        }
       } catch (error) {
-        setLoadError(String(error));
+        if (current) setLoadError(String(error));
       }
     };
     void load();
+    return () => { current = false; };
   }, [refresh.sequence, refresh.type]);
 
   useEffect(() => {
     if (selectedID === null) return;
+    let current = true;
     const loadDetail = async () => {
       try {
         const [nextEndpoint, nextRequests, nextParameters] = await Promise.all([getTargetEndpoint(selectedID), getTargetRequests(selectedID), getTargetParameters(selectedID)]);
-        setEndpoint(nextEndpoint);
-        setRequests(nextRequests);
-        setParameters(nextParameters);
+        if (current) {
+          setEndpoint(nextEndpoint);
+          setRequests(nextRequests);
+          setParameters(nextParameters);
+        }
       } catch (error) {
-        setLoadError(String(error));
+        if (current) setLoadError(String(error));
       }
     };
     void loadDetail();
+    return () => { current = false; };
   }, [selectedID]);
 
   const stale = Boolean(status && status.scopeVersion !== status.activeScopeVersion);
