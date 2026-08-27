@@ -1,4 +1,4 @@
-import type { Exchange, HistoryItem, InterceptConfig, InterceptItem, SendRequest, SendResult, StatusDTO } from '../types';
+import type { Exchange, HistoryItem, InterceptConfig, InterceptItem, RebuildStatus, ScopeRule, ScopeState, SendRequest, SendResult, StatusDTO, TargetEndpoint, TargetParameter, TargetRequestRef, TargetTreeNode } from '../types';
 
 const api = async <T>(path: string, init?: RequestInit): Promise<T> => {
   const response = await fetch(path, init);
@@ -40,3 +40,20 @@ export const forwardIntercept = (id: string, item: InterceptItem) =>
 
 export const dropIntercept = (id: string) =>
   api<void>(`/api/intercept/${id}/drop`, jsonRequest('POST', {}));
+
+export const getScopeState = () => api<ScopeState>('/api/scope/rules');
+
+export const replaceScopeRules = (version: number, rules: ScopeRule[]) =>
+  api<ScopeState>('/api/scope/rules', jsonRequest('PUT', { version, rules }));
+
+export const getTargetTree = () => api<TargetTreeNode[]>('/api/target/tree');
+
+export const getTargetEndpoint = (id: number) => api<TargetEndpoint>(`/api/target/endpoints/${id}`);
+
+export const getTargetRequests = (id: number) => api<TargetRequestRef[]>(`/api/target/endpoints/${id}/requests`);
+
+export const getTargetParameters = (id: number) => api<TargetParameter[]>(`/api/target/endpoints/${id}/parameters`);
+
+export const getRebuildStatus = () => api<RebuildStatus>('/api/target/rebuild');
+
+export const retryTargetRebuild = () => api<RebuildStatus>('/api/target/rebuild', jsonRequest('POST', {}));

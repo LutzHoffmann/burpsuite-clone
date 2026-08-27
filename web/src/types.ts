@@ -82,3 +82,86 @@ export interface InterceptConfig {
   enabled: boolean;
   rules: InterceptRule[];
 }
+
+export type ScopeAction = 'include' | 'exclude';
+
+export interface ScopeRule {
+  id: number;
+  enabled: boolean;
+  action: ScopeAction;
+  scheme: '' | 'http' | 'https';
+  hostPattern: string;
+  port: number;
+  pathPrefix: string;
+}
+
+export interface ScopeState {
+  version: number;
+  rules: ScopeRule[];
+}
+
+export interface TargetTreeNode {
+  id: number;
+  scheme: string;
+  host: string;
+  port: number;
+  path: string;
+  method: string;
+  inScope: boolean;
+  statuses: number[];
+  requestMimes: string[];
+  responseMimes: string[];
+  count: number;
+  lastSeen: string;
+  children: TargetTreeNode[];
+}
+
+export interface TargetEndpoint {
+  id: number;
+  scheme: string;
+  host: string;
+  port: number;
+  path: string;
+  method: string;
+  inScope: boolean;
+  firstSeen: string;
+  lastSeen: string;
+  count: number;
+  statuses: number[];
+  requestMimes: string[];
+  responseMimes: string[];
+  parseDiagnostics: string[];
+  errorSeen: boolean;
+  latestExchangeId: number;
+}
+
+export interface TargetParameter {
+  location: string;
+  name: string;
+  valueType: string;
+  firstSeen: string;
+  lastSeen: string;
+  count: number;
+}
+
+export interface TargetRequestRef {
+  exchangeId: number;
+  startedAt: string;
+  status: number;
+  error: boolean;
+}
+
+export interface RebuildStatus {
+  id: number;
+  scopeVersion: number;
+  activeScopeVersion: number;
+  status: 'idle' | 'building' | 'active' | 'failed' | 'cancelled';
+  processed: number;
+  total: number;
+  error: string;
+}
+
+export interface TargetRefresh {
+  sequence: number;
+  type: 'initial' | 'scope.changed' | 'target.endpoint.updated' | 'target.rebuild.started' | 'target.rebuild.progress' | 'target.rebuild.completed' | 'target.rebuild.failed';
+}
