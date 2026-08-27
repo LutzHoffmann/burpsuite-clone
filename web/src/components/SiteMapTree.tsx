@@ -1,4 +1,4 @@
-import { useDeferredValue, useEffect, useState, type KeyboardEvent } from 'react';
+import { useDeferredValue, useEffect, useRef, useState, type KeyboardEvent } from 'react';
 import type { TargetTreeNode } from '../types';
 
 export type TreeFilters = {
@@ -68,7 +68,7 @@ function filterNodes(nodes: readonly TargetTreeNode[], filters: TreeFilters, par
     const scopeMatches = filters.scope === 'all' || (filters.scope === 'in' ? node.inScope : !node.inScope);
     const methodMatches = filters.method === 'all' || node.method === filters.method;
     const matches = textMatches && scopeMatches && methodMatches && hasStatusFamily(node.statuses, filters.status) && hasMime(node, filters.mime);
-    if (!isEndpoint && children.length === 0 && !matches) return [];
+    if (!isEndpoint && children.length === 0) return [];
     if (isEndpoint && !matches) return [];
     return [{ ...node, children }];
   });
@@ -86,16 +86,31 @@ export function SiteMapTree({ nodes, selectedId, filters, onSelect }: SiteMapTre
   const deferredText = useDeferredValue(filters.text);
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [activeKey, setActiveKey] = useState<string | null>(null);
+  const hadTreeFocus = useRef(false);
+  const restoreFocus = useRef(false);
   const visibleNodes = filterNodes(nodes, { ...filters, text: deferredText });
   const focusableNodes = flattenExpanded(visibleNodes, expanded);
   const currentKey = focusableNodes.some((node) => node.key === activeKey) ? activeKey : focusableNodes[0]?.key ?? null;
 
   useEffect(() => {
-    if (activeKey) document.getElementById(itemID(activeKey))?.focus();
-  }, [activeKey, expanded]);
+    if (activeKey && currentKey !== activeKey) {
+      restoreFocus.current = hadTreeFocus.current;
+      setActiveKey(currentKey);
+    }
+  }, [activeKey, currentKey]);
+
+  useEffect(() => {
+    if (currentKey && restoreFocus.current) {
+      document.getElementById(itemID(currentKey))?.focus();
+      restoreFocus.current = false;
+    }
+  }, [currentKey]);
 
   const moveFocus = (key: string | null) => {
-    if (key) setActiveKey(key);
+    if (key) {
+      restoreFocus.current = true;
+      setActiveKey(key);
+    }
   };
 
   const handleKeyDown = (event: KeyboardEvent<HTMLDivElement>, node: TargetTreeNode, key: string, parentKey: string | null) => {
@@ -161,7 +176,13 @@ export function SiteMapTree({ nodes, selectedId, filters, onSelect }: SiteMapTre
     </li>;
   });
 
-  return <ul className="site-map-tree" role="tree" aria-label="Target site map">
+  return <ul
+    aria-label="Target site map"
+    className="site-map-tree"
+    onBlur={(event) => { hadTreeFocus.current = event.currentTarget.contains(event.relatedTarget); }}
+    onFocus={() => { hadTreeFocus.current = true; }}
+    role="tree"
+  >
     {visibleNodes.length > 0 ? renderNodes(visibleNodes) : <li className="empty-state">No endpoints match these filters.</li>}
   </ul>;
 }

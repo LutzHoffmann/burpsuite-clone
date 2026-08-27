@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { getRebuildStatus, getScopeState, getTargetEndpoint, getTargetParameters, getTargetRequests, getTargetTree, retryTargetRebuild } from '../api/client';
 import type { RebuildStatus, ScopeState, TargetEndpoint, TargetParameter, TargetRefresh, TargetRequestRef, TargetTreeNode } from '../types';
 import { ScopeEditor } from './ScopeEditor';
@@ -14,6 +14,10 @@ const defaultFilters: TreeFilters = { text: '', scope: 'all', method: 'all', sta
 
 function treeHasAuthentication(nodes: readonly TargetTreeNode[]): boolean {
   return nodes.some((node) => node.statuses.some((status) => status === 401 || status === 403) || treeHasAuthentication(node.children));
+}
+
+function treeHasEndpoint(nodes: readonly TargetTreeNode[], id: number): boolean {
+  return nodes.some((node) => (node.method !== '' && node.id === id) || treeHasEndpoint(node.children, id));
 }
 
 function availableValues(nodes: readonly TargetTreeNode[], values: Set<string>, field: 'method' | 'mime') {
@@ -35,6 +39,22 @@ export function TargetWorkspace({ refresh, onOpenHistory, onSendToRepeater }: Ta
   const [parameters, setParameters] = useState<TargetParameter[]>([]);
   const [filters, setFilters] = useState(defaultFilters);
   const [loadError, setLoadError] = useState('');
+  const detailGeneration = useRef(0);
+  const [detailAttempt, setDetailAttempt] = useState(0);
+
+  const clearDetail = () => {
+    detailGeneration.current += 1;
+    setEndpoint(null);
+    setRequests([]);
+    setParameters([]);
+    setLoadError('');
+  };
+
+  const replaceTree = (nextTree: TargetTreeNode[]) => {
+    clearDetail();
+    setTree(nextTree);
+    setSelectedID((id) => id !== null && !treeHasEndpoint(nextTree, id) ? null : id);
+  };
 
   useEffect(() => {
     let current = true;
@@ -48,13 +68,13 @@ export function TargetWorkspace({ refresh, onOpenHistory, onSendToRepeater }: Ta
         }
         if (refresh.type === 'target.endpoint.updated') {
           const nextTree = await getTargetTree();
-          if (current) setTree(nextTree);
+          if (current) replaceTree(nextTree);
           return;
         }
         const [nextScope, nextTree, nextStatus] = await Promise.all([getScopeState(), getTargetTree(), getRebuildStatus()]);
         if (current) {
           setScope(nextScope);
-          setTree(nextTree);
+          replaceTree(nextTree);
           setStatus(nextStatus);
         }
       } catch (error) {
@@ -68,30 +88,35 @@ export function TargetWorkspace({ refresh, onOpenHistory, onSendToRepeater }: Ta
   useEffect(() => {
     if (selectedID === null) return;
     let current = true;
+    const generation = detailGeneration.current;
     const loadDetail = async () => {
       try {
         const [nextEndpoint, nextRequests, nextParameters] = await Promise.all([getTargetEndpoint(selectedID), getTargetRequests(selectedID), getTargetParameters(selectedID)]);
-        if (current) {
+        if (current && generation === detailGeneration.current) {
           setEndpoint(nextEndpoint);
           setRequests(nextRequests);
           setParameters(nextParameters);
+          setLoadError('');
         }
       } catch (error) {
-        if (current) setLoadError(String(error));
+        if (current && generation === detailGeneration.current) setLoadError(String(error));
       }
     };
     void loadDetail();
     return () => { current = false; };
-  }, [selectedID]);
+  }, [selectedID, detailAttempt]);
 
   const stale = Boolean(status && status.scopeVersion !== status.activeScopeVersion);
   const methods = availableValues(tree, new Set(), 'method');
   const mimes = availableValues(tree, new Set(), 'mime');
   const selectEndpoint = (id: number) => {
+    if (id === selectedID && endpoint) return;
+    clearDetail();
+    if (id === selectedID) {
+      setDetailAttempt((attempt) => attempt + 1);
+      return;
+    }
     setSelectedID(id);
-    setEndpoint(null);
-    setRequests([]);
-    setParameters([]);
   };
 
   return <main className="target-workspace" aria-label="Target workspace">

@@ -1,9 +1,16 @@
 import type { Exchange, HistoryItem, InterceptConfig, InterceptItem, RebuildStatus, ScopeRule, ScopeState, SendRequest, SendResult, StatusDTO, TargetEndpoint, TargetParameter, TargetRequestRef, TargetTreeNode } from '../types';
 
+export class ApiError extends Error {
+  constructor(public readonly status: number, statusText: string) {
+    super(`${status} ${statusText}`.trim());
+    this.name = 'ApiError';
+  }
+}
+
 const api = async <T>(path: string, init?: RequestInit): Promise<T> => {
   const response = await fetch(path, init);
   if (!response.ok) {
-    throw new Error(`${response.status} ${response.statusText}`);
+    throw new ApiError(response.status, response.statusText);
   }
   if (response.status === 204) {
     return undefined as T;

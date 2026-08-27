@@ -1,5 +1,5 @@
-import { useEffect, useState } from 'react';
-import { getScopeState, replaceScopeRules } from '../api/client';
+import { useEffect, useRef, useState } from 'react';
+import { ApiError, getScopeState, replaceScopeRules } from '../api/client';
 import type { ScopeAction, ScopeRule, ScopeState } from '../types';
 
 type ScopeEditorProps = {
@@ -15,8 +15,16 @@ export function ScopeEditor({ state, onSaved }: ScopeEditorProps) {
   const [draft, setDraft] = useState<ScopeRule[]>([]);
   const [conflict, setConflict] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState('');
+  const appliedVersion = useRef<number | null>(null);
 
-  useEffect(() => setDraft(state?.rules ?? []), [state]);
+  useEffect(() => {
+    const version = state?.version ?? null;
+    if (appliedVersion.current !== version) {
+      setDraft(state?.rules ?? []);
+      appliedVersion.current = version;
+    }
+  }, [state?.version]);
 
   const updateRule = (index: number, changes: Partial<ScopeRule>) => {
     setDraft(draft.map((rule, ruleIndex) => ruleIndex === index ? { ...rule, ...changes } : rule));
@@ -26,16 +34,25 @@ export function ScopeEditor({ state, onSaved }: ScopeEditorProps) {
     if (!state) return;
     setSaving(true);
     setConflict(false);
+    setSaveError('');
     try {
-      onSaved(await replaceScopeRules(state.version, draft));
+      const saved = await replaceScopeRules(state.version, draft);
+      setDraft(saved.rules);
+      appliedVersion.current = saved.version;
+      onSaved(saved);
     } catch (error) {
-      if (String(error).startsWith('Error: 409')) {
+      if (error instanceof ApiError && error.status === 409) {
         setConflict(true);
         try {
-          onSaved(await getScopeState());
-        } catch {
-          // Preserve the conflict feedback even when the refresh cannot complete.
+          const latest = await getScopeState();
+          setDraft(latest.rules);
+          appliedVersion.current = latest.version;
+          onSaved(latest);
+        } catch (reloadError) {
+          setSaveError(reloadError instanceof Error ? reloadError.message : 'Unable to reload scope rules');
         }
+      } else {
+        setSaveError(error instanceof Error ? error.message : 'Unable to save scope rules');
       }
     } finally {
       setSaving(false);
@@ -45,6 +62,7 @@ export function ScopeEditor({ state, onSaved }: ScopeEditorProps) {
   return <section aria-label="Scope editor" className="scope-editor">
     <div className="target-section-heading"><div><span className="eyebrow">Authorized targets</span><h1>Scope</h1></div><small>v{state?.version ?? '-'}</small></div>
     {conflict && <p className="scope-conflict" role="alert">Scope changed in another session</p>}
+    {saveError && <p className="scope-conflict" role="alert">Scope save failed: {saveError}</p>}
     <div className="scope-rules">
       {draft.map((rule, index) => <fieldset className="scope-rule" key={`${rule.id}-${index}`}>
         <legend>{rule.action}</legend>
