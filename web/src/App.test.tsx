@@ -3,7 +3,7 @@ import { fireEvent, render, screen, waitFor, within } from '@testing-library/rea
 import '@testing-library/jest-dom/vitest';
 import { App } from './App';
 import { Inspector } from './components/Inspector';
-import type { HistoryItem, ScopeState, TargetTreeNode } from './types';
+import type { HistoryItem, ScopeState, StatusDTO, TargetTreeNode } from './types';
 
 type RecordedSocket = {
   close: ReturnType<typeof vi.fn>;
@@ -38,8 +38,14 @@ const targetTreeFixture: TargetTreeNode[] = [{
 
 const scopeFixture: ScopeState = { version: 12, rules: [] };
 
-function strictBaseResponse(path: string, history: HistoryItem[]) {
-  if (path === '/api/status') return jsonResponse(statusFixture);
+function requestDetails(input: RequestInfo | URL, init?: RequestInit) {
+  return { path: new URL(String(input), 'http://localhost').pathname, method: init?.method ?? 'GET' };
+}
+
+function strictBaseResponse(input: RequestInfo | URL, init: RequestInit | undefined, history: HistoryItem[], status: StatusDTO = statusFixture) {
+  const { path, method } = requestDetails(input, init);
+  if (method !== 'GET') return null;
+  if (path === '/api/status') return jsonResponse(status);
   if (path === '/api/history') return jsonResponse(history);
   if (path === '/api/intercept/queue') return jsonResponse([]);
   if (path === '/api/intercept/config') return jsonResponse({ enabled: false, rules: [] });
@@ -51,28 +57,37 @@ function strictBaseResponse(path: string, history: HistoryItem[]) {
   return null;
 }
 
+function initialAppFetchFixture(history: HistoryItem[] = [], status: StatusDTO = statusFixture): ReturnType<typeof vi.fn> {
+  return vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const response = strictBaseResponse(input, init, history, status);
+    if (response) return response;
+    const { path, method } = requestDetails(input, init);
+    throw new Error(`Unexpected request: ${method} ${path}`);
+  });
+}
+
 function fullAppTargetFetchFixture(): ReturnType<typeof vi.fn> {
   const history = [
     { ...historyFixture(42, 'target.test', '/from-target'), query: 'q=1', inScope: true },
     { ...historyFixture(43, 'outside.test', '/public'), method: 'GET', query: 'token=needle', inScope: false },
   ];
   return vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-    const path = new URL(String(input), 'http://localhost').pathname;
-    const base = strictBaseResponse(path, history);
+    const { path, method } = requestDetails(input, init);
+    const base = strictBaseResponse(input, init, history);
     if (base) return base;
-    if (path === '/api/scope/rules' && (!init?.method || init.method === 'GET')) return jsonResponse(scopeFixture);
-    if (path === '/api/target/tree') return jsonResponse(targetTreeFixture);
-    if (path === '/api/target/rebuild' && (!init?.method || init.method === 'GET')) {
+    if (path === '/api/scope/rules' && method === 'GET') return jsonResponse(scopeFixture);
+    if (path === '/api/target/tree' && method === 'GET') return jsonResponse(targetTreeFixture);
+    if (path === '/api/target/rebuild' && method === 'GET') {
       return jsonResponse({ id: 3, scopeVersion: 12, activeScopeVersion: 12, status: 'building', processed: 2, total: 5, error: '' });
     }
-    if (path === '/api/target/endpoints/7') return jsonResponse({
+    if (path === '/api/target/endpoints/7' && method === 'GET') return jsonResponse({
       id: 7, scheme: 'https', host: 'target.test', port: 443, path: '/from-target', method: 'GET', inScope: true,
       firstSeen: '2026-08-20T10:00:00Z', lastSeen: '2026-08-20T10:05:00Z', count: 1, statuses: [200],
       requestMimes: ['text/plain'], responseMimes: ['text/plain'], parseDiagnostics: [], errorSeen: false, latestExchangeId: 43,
     });
-    if (path === '/api/target/endpoints/7/requests') return jsonResponse([{ exchangeId: 43, startedAt: '2026-08-20T10:05:00Z', status: 200, error: false }]);
-    if (path === '/api/target/endpoints/7/parameters') return jsonResponse([]);
-    throw new Error(`Unexpected request: ${init?.method ?? 'GET'} ${path}`);
+    if (path === '/api/target/endpoints/7/requests' && method === 'GET') return jsonResponse([{ exchangeId: 43, startedAt: '2026-08-20T10:05:00Z', status: 200, error: false }]);
+    if (path === '/api/target/endpoints/7/parameters' && method === 'GET') return jsonResponse([]);
+    throw new Error(`Unexpected request: ${method} ${path}`);
   });
 }
 
@@ -84,23 +99,23 @@ function countFetches(fetchMock: ReturnType<typeof vi.fn>, path: string, method 
 }
 
 function historyAddToScopeFetchFixture(options: { item?: HistoryItem; scope?: ScopeState; conflict?: boolean } = {}): ReturnType<typeof vi.fn> {
-  const item = options.item ?? ({ ...historyFixture(51, 'Example.TEST', '/admin'), scheme: 'https', inScope: false } as HistoryItem);
+  const item = options.item ?? { ...historyFixture(51, 'Example.TEST', '/admin'), scheme: 'https', inScope: false };
   const history = [item];
   let scopeReads = 0;
   return vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-    const path = new URL(String(input), 'http://localhost').pathname;
-    const base = strictBaseResponse(path, history);
+    const { path, method } = requestDetails(input, init);
+    const base = strictBaseResponse(input, init, history);
     if (base) return base;
-    if (path === '/api/scope/rules' && (!init?.method || init.method === 'GET')) {
+    if (path === '/api/scope/rules' && method === 'GET') {
       scopeReads += 1;
       return jsonResponse({ ...(options.scope ?? scopeFixture), version: (options.scope ?? scopeFixture).version + (scopeReads > 1 ? 1 : 0) });
     }
-    if (path === '/api/scope/rules' && init?.method === 'PUT') {
-      scopeUpdates.push(JSON.parse(String(init.body)));
+    if (path === '/api/scope/rules' && method === 'PUT') {
+      scopeUpdates.push(JSON.parse(String(init?.body)));
       if (options.conflict) return new Response('{}', { status: 409, statusText: 'Conflict' });
       return jsonResponse({ version: (options.scope ?? scopeFixture).version + 1, rules: scopeUpdates.at(-1)?.rules ?? [] });
     }
-    throw new Error(`Unexpected request: ${init?.method ?? 'GET'} ${path}`);
+    throw new Error(`Unexpected request: ${method} ${path}`);
   });
 }
 
@@ -108,10 +123,15 @@ function lastScopeUpdate() {
   return scopeUpdates.at(-1);
 }
 
+async function renderSettledApp() {
+  render(<App />);
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+}
+
 beforeEach(() => {
-	recordedSockets = [];
+  recordedSockets = [];
   scopeUpdates = [];
-	vi.stubGlobal('fetch', vi.fn(() => new Promise<Response>(() => undefined)));
+  vi.stubGlobal('fetch', initialAppFetchFixture());
   installFakeEventSocket();
 });
 
@@ -119,21 +139,17 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+test('default App fetch fixture rejects unexpected requests', async () => {
+  await expect(fetch('/api/unexpected')).rejects.toThrow('Unexpected request: GET /api/unexpected');
+});
+
 test('loads status from api', async () => {
-  vi.stubGlobal('fetch', vi.fn(async (url: string) => {
-    if (url.endsWith('/api/status')) {
-      return new Response(JSON.stringify({
-        apiAddr: '127.0.0.1:9080',
-        proxyAddr: '127.0.0.1:18080',
-        caFingerprint: 'AA:BB',
-        caTrust: 'manual',
-        httpsInterception: true,
-      }), { status: 200, headers: { 'Content-Type': 'application/json' } });
-    }
-    if (url.endsWith('/api/history')) {
-      return new Response(JSON.stringify([]), { status: 200 });
-    }
-    return new Response('{}', { status: 404 });
+  vi.stubGlobal('fetch', initialAppFetchFixture([], {
+    apiAddr: '127.0.0.1:9080',
+    proxyAddr: '127.0.0.1:18080',
+    caFingerprint: 'AA:BB',
+    caTrust: 'manual',
+    httpsInterception: true,
   }));
   render(<App />);
   expect(await screen.findByText('127.0.0.1:18080')).toBeInTheDocument();
@@ -142,15 +158,15 @@ test('loads status from api', async () => {
   expect(screen.getByText(/install and trust the local ca certificate/i)).toBeInTheDocument();
 });
 
-test('renders operator shell status', () => {
-  render(<App />);
+test('renders operator shell status', async () => {
+  await renderSettledApp();
   expect(screen.getByText('Proxy')).toBeInTheDocument();
   expect(screen.getByText('History')).toBeInTheDocument();
   expect(screen.getByText('Repeater')).toBeInTheDocument();
 });
 
-test('shows history columns and inspector tabs', () => {
-  render(<App />);
+test('shows history columns and inspector tabs', async () => {
+  await renderSettledApp();
   expect(screen.getByText('Method')).toBeInTheDocument();
   expect(screen.getByText('Host')).toBeInTheDocument();
   expect(screen.getByText('Status')).toBeInTheDocument();
@@ -170,8 +186,8 @@ test('keeps inspector tabs available when no exchange is selected', () => {
   expect(screen.getByText('Select a request to inspect its exchange.')).toBeInTheDocument();
 });
 
-test('shows intercept and repeater controls', () => {
-  render(<App />);
+test('shows intercept and repeater controls', async () => {
+  await renderSettledApp();
   expect(screen.getByText('Intercept Queue')).toBeInTheDocument();
   expect(screen.getByRole('button', { name: 'Forward' })).toBeInTheDocument();
   expect(screen.getByRole('button', { name: 'Drop' })).toBeInTheDocument();
@@ -179,24 +195,21 @@ test('shows intercept and repeater controls', () => {
   expect(screen.getByRole('button', { name: 'Send' })).toBeInTheDocument();
 });
 
-test('keeps the intercept queue outside the hidden utilities panel', () => {
-  render(<App />);
+test('keeps the intercept queue outside the hidden utilities panel', async () => {
+  await renderSettledApp();
 
   expect(screen.getByLabelText('Intercept Queue').closest('.utility-panel')).toBeNull();
 });
 
 test('selects history rows and loads request and response detail from api', async () => {
-  const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
-    const url = String(input);
-    if (url.endsWith('/api/status')) return jsonResponse(statusFixture);
-    if (url.endsWith('/api/history')) return jsonResponse([
-      historyFixture(1, 'first.test', '/one'),
-      historyFixture(2, 'second.test', '/two'),
-    ]);
-    if (url.endsWith('/api/history/1')) return jsonResponse(exchangeFixture(1, 'first.test', '/one', 'first response'));
-    if (url.endsWith('/api/history/2')) return jsonResponse(exchangeFixture(2, 'second.test', '/two', 'second response'));
-    if (url.endsWith('/api/intercept/queue')) return jsonResponse([]);
-    return new Response('{}', { status: 404 });
+  const history = [historyFixture(1, 'first.test', '/one'), historyFixture(2, 'second.test', '/two')];
+  const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const { path, method } = requestDetails(input, init);
+    if (path === '/api/history/1' && method === 'GET') return jsonResponse(exchangeFixture(1, 'first.test', '/one', 'first response'));
+    if (path === '/api/history/2' && method === 'GET') return jsonResponse(exchangeFixture(2, 'second.test', '/two', 'second response'));
+    const response = strictBaseResponse(input, init, history);
+    if (response) return response;
+    throw new Error(`Unexpected request: ${method} ${path}`);
   });
   vi.stubGlobal('fetch', fetchMock);
 
@@ -210,18 +223,18 @@ test('selects history rows and loads request and response detail from api', asyn
 });
 
 test('sends a selected history request to repeater through the api', async () => {
+  const history = [historyFixture(7, 'replay.test', '/submit')];
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-    const url = String(input);
-    if (url.endsWith('/api/status')) return jsonResponse(statusFixture);
-    if (url.endsWith('/api/history')) return jsonResponse([historyFixture(7, 'replay.test', '/submit')]);
-    if (url.endsWith('/api/history/7')) return jsonResponse(exchangeFixture(7, 'replay.test', '/submit', 'captured'));
-    if (url.endsWith('/api/intercept/queue')) return jsonResponse([]);
-    if (url.endsWith('/api/repeater/sessions/default/send')) {
+    const { path, method } = requestDetails(input, init);
+    if (path === '/api/history/7' && method === 'GET') return jsonResponse(exchangeFixture(7, 'replay.test', '/submit', 'captured'));
+    if (path === '/api/repeater/sessions/default/send' && method === 'POST') {
       expect(init?.method).toBe('POST');
       expect(JSON.parse(String(init?.body))).toMatchObject({ method: 'POST', url: 'https://replay.test/submit', body: 'request text' });
       return jsonResponse({ status: 202, headers: { 'Content-Type': ['text/plain'] }, body: 'real response', durationMs: 9, size: 13, truncated: false, contentType: 'text/plain' });
     }
-    return new Response('{}', { status: 404 });
+    const response = strictBaseResponse(input, init, history);
+    if (response) return response;
+    throw new Error(`Unexpected request: ${method} ${path}`);
   });
   vi.stubGlobal('fetch', fetchMock);
 
@@ -240,17 +253,17 @@ test('loads intercept queue and calls edit-forward and drop api actions', async 
     { id: 'two', method: 'GET', url: 'http://two.test/', headers: {}, body: '', bodyEditable: true, bodyTruncated: false },
   ];
   vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-    const url = String(input);
-    if (url.endsWith('/api/status')) return jsonResponse(statusFixture);
-    if (url.endsWith('/api/history')) return jsonResponse([]);
-    if (url.endsWith('/api/intercept/queue')) return jsonResponse(queue);
-	if (url.endsWith('/api/intercept/config')) return jsonResponse({ enabled: true, rules: [] });
-    if (url.includes('/api/intercept/')) {
-      actions.push({ url, init });
-      queue = queue.filter((item) => !url.includes(`/${item.id}/`));
+    const { path, method } = requestDetails(input, init);
+    if (path === '/api/status' && method === 'GET') return jsonResponse(statusFixture);
+    if (path === '/api/history' && method === 'GET') return jsonResponse([]);
+    if (path === '/api/intercept/queue' && method === 'GET') return jsonResponse(queue);
+    if (path === '/api/intercept/config' && method === 'GET') return jsonResponse({ enabled: true, rules: [] });
+    if ((path === '/api/intercept/one/forward' || path === '/api/intercept/two/drop') && method === 'POST') {
+      actions.push({ url: path, init });
+      queue = queue.filter((item) => !path.includes(`/${item.id}/`));
       return new Response(null, { status: 204 });
     }
-    return new Response('{}', { status: 404 });
+    throw new Error(`Unexpected request: ${method} ${path}`);
   }));
 
   render(<App />);
@@ -287,6 +300,24 @@ test('opens Target and routes endpoint and rebuild events without reloading Hist
   await waitFor(() => expect(countFetches(fetchMock, '/api/target/rebuild')).toBe(rebuildLoads + 1));
   expect(countFetches(fetchMock, '/api/history')).toBe(historyLoads);
   expect(countFetches(fetchMock, '/api/target/tree')).toBe(treeLoads + 1);
+});
+
+test.each(['target.rebuild.progress', 'target.endpoint.updated'])('opens Target with a complete load after hidden %s', async (eventType) => {
+  const fetchMock = fullAppTargetFetchFixture();
+  vi.stubGlobal('fetch', fetchMock);
+  const socket = recordedSockets[0];
+
+  render(<App />);
+  await screen.findByRole('button', { name: /Select POST target\.test\/from-target/ });
+  socket.emit(eventType);
+  expect(countFetches(fetchMock, '/api/history')).toBe(1);
+
+  fireEvent.click(screen.getByRole('button', { name: 'Target' }));
+  expect(await screen.findByRole('treeitem', { name: /^GET \/from-target/ })).toBeInTheDocument();
+  expect(countFetches(fetchMock, '/api/scope/rules')).toBe(1);
+  expect(countFetches(fetchMock, '/api/target/tree')).toBe(1);
+  expect(countFetches(fetchMock, '/api/target/rebuild')).toBe(1);
+  expect(countFetches(fetchMock, '/api/history')).toBe(1);
 });
 
 test('opens a Target request in the existing History inspector', async () => {
@@ -353,7 +384,7 @@ test('adds a normalized origin to scope with the latest version and effective HT
 });
 
 test('adds a bracketed IPv6 origin with its explicit port', async () => {
-  const item = { ...historyFixture(52, '[2001:DB8::1]:8443', '/admin'), scheme: 'https', inScope: false } as HistoryItem;
+  const item = { ...historyFixture(52, '[2001:DB8::1]:8443', '/admin'), scheme: 'https', inScope: false };
   vi.stubGlobal('fetch', historyAddToScopeFetchFixture({ item }));
   render(<App />);
   fireEvent.click(await screen.findByRole('button', { name: 'Add [2001:DB8::1]:8443 to scope' }));
@@ -362,6 +393,46 @@ test('adds a bracketed IPv6 origin with its explicit port', async () => {
   expect(lastScopeUpdate()?.rules).toEqual([
     expect.objectContaining({ scheme: 'https', hostPattern: '2001:db8::1', port: 8443, pathPrefix: '/' }),
   ]);
+});
+
+test.each([
+  ['numeric DNS-like host', '127.1', 'http', '127.1', 80],
+  ['Unicode DNS host', 'BÜCHER.Example', 'https', 'xn--bcher-kva.example', 443],
+  ['expanded bare IPv6 host', '2001:0DB8:0000:0000:0000:0000:0000:0001', 'https', '2001:db8::1', 443],
+  ['minimum explicit port', 'ports.test:1', 'http', 'ports.test', 1],
+  ['maximum explicit port', 'ports.test:65535', 'https', 'ports.test', 65535],
+])('normalizes %s like the backend', async (_name, host, scheme, expectedHost, expectedPort) => {
+  const item = { ...historyFixture(60, host, '/path'), scheme };
+  vi.stubGlobal('fetch', historyAddToScopeFetchFixture({ item }));
+  render(<App />);
+  fireEvent.click(await screen.findByRole('button', { name: `Add ${host} to scope` }));
+
+  await waitFor(() => expect(lastScopeUpdate()).toBeDefined());
+  expect(lastScopeUpdate()?.rules).toEqual([
+    expect.objectContaining({ scheme, hostPattern: expectedHost, port: expectedPort, pathPrefix: '/' }),
+  ]);
+});
+
+test.each([
+  'user@example.test',
+  'example.test/path',
+  'example.test?query',
+  'example.test#fragment',
+  '[2001:db8::1',
+  '[2001:db8::1]extra',
+  'example.test:',
+  'example.test:0',
+  'example.test:65536',
+  'example.test:not-a-port',
+])('rejects malformed scope authority %s before fetching scope', async (host) => {
+  const fetchMock = historyAddToScopeFetchFixture({ item: { ...historyFixture(61, host, '/path'), scheme: 'https' } });
+  vi.stubGlobal('fetch', fetchMock);
+  render(<App />);
+  fireEvent.click(await screen.findByRole('button', { name: `Add ${host} to scope` }));
+
+  expect(await screen.findByRole('status')).toHaveTextContent(/Add to scope failed/);
+  expect(countFetches(fetchMock, '/api/scope/rules')).toBe(0);
+  expect(countFetches(fetchMock, '/api/scope/rules', 'PUT')).toBe(0);
 });
 
 test('does not add an equivalent enabled include rule', async () => {
@@ -374,6 +445,41 @@ test('does not add an equivalent enabled include rule', async () => {
   await waitFor(() => expect(countFetches(fetchMock, '/api/scope/rules')).toBe(1));
   expect(countFetches(fetchMock, '/api/scope/rules', 'PUT')).toBe(0);
   expect(lastScopeUpdate()).toBeUndefined();
+});
+
+test.each([
+  ['empty root path', 'example.test', 'https', { scheme: 'https', hostPattern: 'example.test', port: 443, pathPrefix: '' }],
+  ['Unicode and IDNA hosts', 'xn--bcher-kva.example', 'https', { scheme: 'https', hostPattern: 'BÜCHER.Example', port: 443, pathPrefix: '/' }],
+  ['expanded and compressed IPv6', '[2001:db8::1]', 'https', { scheme: 'https', hostPattern: '2001:0DB8:0000:0000:0000:0000:0000:0001', port: 443, pathPrefix: '/' }],
+  ['case-normalized scheme and host', 'example.test', 'https', { scheme: 'HTTPS', hostPattern: 'EXAMPLE.TEST', port: 443, pathPrefix: '/' }],
+])('deduplicates semantically equivalent include rules with %s', async (_name, host, scheme, equivalent) => {
+  const scope = { version: 30, rules: [{ id: 11, enabled: true, action: 'include', ...equivalent }] } as ScopeState;
+  const fetchMock = historyAddToScopeFetchFixture({ item: { ...historyFixture(62, host, '/path'), scheme }, scope });
+  vi.stubGlobal('fetch', fetchMock);
+  render(<App />);
+  fireEvent.click(await screen.findByRole('button', { name: `Add ${host} to scope` }));
+
+  await waitFor(() => expect(countFetches(fetchMock, '/api/scope/rules')).toBe(1));
+  expect(countFetches(fetchMock, '/api/scope/rules', 'PUT')).toBe(0);
+  expect(lastScopeUpdate()).toBeUndefined();
+});
+
+test('does not deduplicate disabled, exclude, wildcard, or broader scheme and port rules', async () => {
+  const scope: ScopeState = { version: 31, rules: [
+    { id: 1, enabled: false, action: 'include', scheme: 'https', hostPattern: 'example.test', port: 443, pathPrefix: '/' },
+    { id: 2, enabled: true, action: 'exclude', scheme: 'https', hostPattern: 'example.test', port: 443, pathPrefix: '/' },
+    { id: 3, enabled: true, action: 'include', scheme: 'https', hostPattern: '*.example.test', port: 443, pathPrefix: '/' },
+    { id: 4, enabled: true, action: 'include', scheme: '', hostPattern: 'example.test', port: 443, pathPrefix: '/' },
+    { id: 5, enabled: true, action: 'include', scheme: 'https', hostPattern: 'example.test', port: 0, pathPrefix: '/' },
+  ] };
+  const fetchMock = historyAddToScopeFetchFixture({ scope });
+  vi.stubGlobal('fetch', fetchMock);
+  render(<App />);
+  fireEvent.click(await screen.findByRole('button', { name: 'Add Example.TEST to scope' }));
+
+  await waitFor(() => expect(lastScopeUpdate()).toBeDefined());
+  expect(lastScopeUpdate()?.rules).toHaveLength(6);
+  expect(lastScopeUpdate()?.rules.at(-1)).toEqual(expect.objectContaining({ scheme: 'https', hostPattern: 'example.test', port: 443 }));
 });
 
 test('reloads scope once after a 409, shows an error, and does not retry the write', async () => {
@@ -394,6 +500,7 @@ const statusFixture = {
 const historyFixture = (id: number, host: string, path: string) => ({
   id, method: 'POST', scheme: 'https', host, path, query: '', status: 200, mimeType: 'text/plain', requestSize: 12,
   responseSize: 13, durationMs: 125, startedAt: '2026-08-19T10:24:00Z', intercepted: false, error: false,
+  inScope: false, scopeVersion: 12, scopeRuleId: null,
 });
 
 const exchangeFixture = (id: number, host: string, path: string, responseBody: string) => ({

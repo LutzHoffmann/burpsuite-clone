@@ -22,6 +22,9 @@ export interface HistoryItem {
   startedAt: string;
   intercepted: boolean;
   error: boolean;
+  inScope: boolean;
+  scopeVersion: number;
+  scopeRuleId: number | null;
 }
 
 export interface MessageDetail {

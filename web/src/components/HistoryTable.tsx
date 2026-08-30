@@ -10,8 +10,6 @@ type HistoryTableProps = {
   onAddOriginToScope: (item: HistoryItem) => void;
 };
 
-type ScopedHistoryItem = HistoryItem & { inScope: boolean };
-
 function formatBytes(bytes: number) {
   return bytes >= 1024 ? `${(bytes / 1024).toFixed(1)} kB` : `${bytes} B`;
 }
@@ -23,9 +21,8 @@ function formatTime(startedAt: string) {
 export function HistoryTable({ items, selectedId, query, scopeFilter, onSelect, onSendToRepeater, onAddOriginToScope }: HistoryTableProps) {
   const normalizedQuery = query.trim().toLowerCase();
   const filteredItems = items.filter((item) => {
-    const inScope = (item as ScopedHistoryItem).inScope;
     const matchesQuery = !normalizedQuery || [item.method, item.host, item.path, item.query].some((value) => value.toLowerCase().includes(normalizedQuery));
-    const matchesScope = scopeFilter === 'all' || (scopeFilter === 'in' ? inScope : !inScope);
+    const matchesScope = scopeFilter === 'all' || (scopeFilter === 'in' ? item.inScope : !item.inScope);
     return matchesQuery && matchesScope;
   });
 
@@ -36,7 +33,6 @@ export function HistoryTable({ items, selectedId, query, scopeFilter, onSelect, 
         <span>MIME</span><span>Size</span><span>Duration</span><span>Time</span><span>Scope</span><span>Action</span>
       </div>
       {filteredItems.map((item) => {
-        const inScope = (item as ScopedHistoryItem).inScope;
         return <div
           className={`table-row ${item.id === selectedId ? 'selected' : ''}`}
           key={item.id}
@@ -59,7 +55,7 @@ export function HistoryTable({ items, selectedId, query, scopeFilter, onSelect, 
             <span>{item.durationMs} ms</span>
             <span>{formatTime(item.startedAt)}</span>
           </button>
-          <span className={`scope-badge ${inScope ? 'in-scope' : 'out-of-scope'}`}>{inScope ? 'In scope' : 'Out of scope'}</span>
+          <span className={`scope-badge ${item.inScope ? 'in-scope' : 'out-of-scope'}`}>{item.inScope ? 'In scope' : 'Out of scope'}</span>
           <button className="add-scope-button" onClick={() => onAddOriginToScope(item)} type="button">Add {item.host} to scope</button>
         </div>;
       })}

@@ -35,7 +35,7 @@ const fallbackStatus: StatusDTO = {
 const developmentFallback: HistoryItem[] = [{
   id: 1, method: 'GET', scheme: 'https', host: 'api.example.test', path: '/v1/example', query: '',
   status: 200, mimeType: 'application/json', requestSize: 128, responseSize: 512, durationMs: 42,
-  startedAt: '2026-08-19T10:24:00Z', intercepted: false, error: false,
+  startedAt: '2026-08-19T10:24:00Z', intercepted: false, error: false, inScope: false, scopeVersion: 0, scopeRuleId: null,
 }];
 
 const emptyRepeaterRequest: SendRequest = { method: 'GET', url: '', headers: {}, body: '' };
@@ -44,28 +44,85 @@ function isTargetRefreshType(type: string): type is TargetRefresh['type'] {
   return type === 'scope.changed' || type === 'target.endpoint.updated' || type.startsWith('target.rebuild.');
 }
 
+function canonicalIPv6(value: string): string | null {
+  try {
+    const hostname = new URL(`http://[${value}]`).hostname;
+    return hostname.startsWith('[') && hostname.endsWith(']') ? hostname.slice(1, -1).toLowerCase() : null;
+  } catch {
+    return null;
+  }
+}
+
+function normalizeHost(value: string): string {
+  const host = value.trim().toLowerCase();
+  if (!host) throw new Error('Host is empty');
+  const ipv6 = canonicalIPv6(host);
+  if (ipv6) return ipv6;
+  if (/[@/\\?#%:[\]\s]/u.test(host)) throw new Error(`Invalid host ${value}`);
+  try {
+    const ascii = new URL(`http://${host}`).hostname.toLowerCase();
+    if (!ascii) throw new Error(`Invalid host ${value}`);
+    // WHATWG canonicalizes numeric DNS-like names as IPv4; Go's IDNA path preserves them.
+    return /^[\x00-\x7F]+$/.test(host) ? host : ascii;
+  } catch {
+    throw new Error(`Invalid host ${value}`);
+  }
+}
+
+function parsePort(value: string): number {
+  if (!/^\d+$/.test(value)) throw new Error(`Invalid port ${value || '(empty)'}`);
+  const port = Number(value);
+  if (port < 1 || port > 65535) throw new Error(`Invalid port ${value}`);
+  return port;
+}
+
+function splitAuthority(value: string, scheme: 'http' | 'https') {
+  const authority = value.trim();
+  if (!authority || /[@/\\?#]/u.test(authority)) throw new Error(`Invalid host ${value}`);
+  const defaultPort = scheme === 'https' ? 443 : 80;
+
+  if (authority.startsWith('[')) {
+    const match = authority.match(/^\[([^\]]+)\](?::(.*))?$/);
+    if (!match) throw new Error(`Invalid host ${value}`);
+    const host = canonicalIPv6(match[1]);
+    if (!host) throw new Error(`Invalid host ${value}`);
+    return { host, port: match[2] === undefined ? defaultPort : parsePort(match[2]) };
+  }
+  if (authority.includes('[') || authority.includes(']')) throw new Error(`Invalid host ${value}`);
+
+  if (authority.includes(':')) {
+    const ipv6 = canonicalIPv6(authority);
+    if (ipv6) return { host: ipv6, port: defaultPort };
+    if (authority.indexOf(':') !== authority.lastIndexOf(':')) throw new Error(`Invalid host ${value}`);
+    const separator = authority.lastIndexOf(':');
+    return { host: normalizeHost(authority.slice(0, separator)), port: parsePort(authority.slice(separator + 1)) };
+  }
+  return { host: normalizeHost(authority), port: defaultPort };
+}
+
 function scopeRuleForOrigin(item: HistoryItem): ScopeRule {
   const scheme = item.scheme.toLowerCase();
   if (scheme !== 'http' && scheme !== 'https') throw new Error(`Unsupported scheme ${item.scheme}`);
-  const origin = new URL(`${scheme}://${item.host}`);
-  if (origin.username || origin.password || origin.pathname !== '/' || origin.search || origin.hash) throw new Error(`Invalid host ${item.host}`);
-  const hostname = origin.hostname.replace(/^\[|\]$/g, '').toLowerCase();
-  if (!hostname) throw new Error(`Invalid host ${item.host}`);
+  const origin = splitAuthority(item.host, scheme);
   return {
     id: 0,
     enabled: true,
     action: 'include',
     scheme,
-    hostPattern: hostname,
-    port: origin.port ? Number(origin.port) : scheme === 'https' ? 443 : 80,
+    hostPattern: origin.host,
+    port: origin.port,
     pathPrefix: '/',
   };
 }
 
 function equivalentInclude(rule: ScopeRule, candidate: ScopeRule) {
-  return rule.enabled && rule.action === 'include' && rule.scheme === candidate.scheme
-    && rule.hostPattern.toLowerCase().replace(/^\[|\]$/g, '') === candidate.hostPattern
-    && rule.port === candidate.port && rule.pathPrefix === '/';
+  if (!rule.enabled || rule.action !== 'include' || rule.hostPattern.startsWith('*.') || rule.hostPattern.includes('*')) return false;
+  if (rule.scheme.toLowerCase() !== candidate.scheme || rule.port !== candidate.port || (rule.pathPrefix || '/') !== '/') return false;
+  try {
+    return normalizeHost(rule.hostPattern) === candidate.hostPattern;
+  } catch {
+    return false;
+  }
 }
 
 export function App() {
@@ -249,6 +306,11 @@ export function App() {
     }
   };
 
+  const openTarget = () => {
+    if (view !== 'target') setTargetRefresh((refresh) => ({ sequence: refresh.sequence + 1, type: 'initial' }));
+    setView('target');
+  };
+
   return (
     <main className="app-shell">
       <StatusBar status={status} />
@@ -256,7 +318,7 @@ export function App() {
         <nav className="navigation" aria-label="Tools">
           <button className={`nav-item ${view === 'traffic' ? 'active' : ''}`} onClick={() => setView('traffic')} type="button"><Network size={17} />Traffic</button>
           <button className="nav-item" type="button"><History size={17} />History</button>
-          <button className={`nav-item ${view === 'target' ? 'active' : ''}`} onClick={() => setView('target')} type="button"><Map size={17} />Target</button>
+          <button className={`nav-item ${view === 'target' ? 'active' : ''}`} onClick={openTarget} type="button"><Map size={17} />Target</button>
           <button className="nav-item" type="button"><Send size={17} />Repeater</button>
           <button className="nav-item" type="button"><Boxes size={17} />Extensions</button>
           <div className="nav-spacer" />
