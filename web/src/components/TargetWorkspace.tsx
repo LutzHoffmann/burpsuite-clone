@@ -54,6 +54,7 @@ export function TargetWorkspace({ refresh, onOpenHistory, onSendToRepeater }: Ta
     clearDetail();
     setTree(nextTree);
     setSelectedID((id) => id !== null && !treeHasEndpoint(nextTree, id) ? null : id);
+    setDetailAttempt((attempt) => attempt + 1);
   };
 
   useEffect(() => {

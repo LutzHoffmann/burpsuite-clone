@@ -180,7 +180,11 @@ export function SiteMapTree({ nodes, selectedId, filters, onSelect }: SiteMapTre
     aria-label="Target site map"
     className="site-map-tree"
     onBlur={(event) => { hadTreeFocus.current = event.currentTarget.contains(event.relatedTarget); }}
-    onFocus={() => { hadTreeFocus.current = true; }}
+    onFocus={(event) => {
+      hadTreeFocus.current = true;
+      const focusedKey = focusableNodes.find((node) => itemID(node.key) === (event.target as HTMLElement).id)?.key;
+      if (focusedKey && focusedKey !== activeKey) setActiveKey(focusedKey);
+    }}
     role="tree"
   >
     {visibleNodes.length > 0 ? renderNodes(visibleNodes) : <li className="empty-state">No endpoints match these filters.</li>}

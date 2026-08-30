@@ -1,6 +1,7 @@
 import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import '@testing-library/jest-dom/vitest';
+import { act } from 'react';
 // @ts-expect-error Vitest executes this test in Node, while the web build excludes Node types.
 import { readFileSync } from 'node:fs';
 import type { ScopeState, TargetTreeNode } from '../types';
@@ -226,6 +227,42 @@ test('invalidates delayed detail after a completed rebuild removes the endpoint'
   expect(screen.queryByText(/GET example\.test\/api\/users/)).not.toBeInTheDocument();
 });
 
+test('reloads surviving endpoint details after an endpoint update replaces the tree', async () => {
+  const fixture = targetFetchFixture();
+  let detailReads = 0;
+  let parameterReads = 0;
+  let requestReads = 0;
+  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const path = new URL(String(input), 'http://localhost').pathname;
+    if (path === '/api/target/endpoints/7') {
+      detailReads += 1;
+      return response({ ...endpoint, count: detailReads === 1 ? 3 : 4 });
+    }
+    if (path === '/api/target/endpoints/7/requests') {
+      requestReads += 1;
+      return response([{ exchangeId: requestReads === 1 ? 42 : 43, startedAt: '2026-08-20T10:06:00Z', status: 200, error: false }]);
+    }
+    if (path === '/api/target/endpoints/7/parameters') {
+      parameterReads += 1;
+      return response([{ location: 'json', name: parameterReads === 1 ? 'user.email' : 'user.name', valueType: 'string', firstSeen: '2026-08-20T10:00:00Z', lastSeen: '2026-08-20T10:06:00Z', count: parameterReads === 1 ? 3 : 4 }]);
+    }
+    return fixture(input, init);
+  }));
+  const props = { onOpenHistory: vi.fn(), onSendToRepeater: vi.fn() };
+  const { rerender } = render(<TargetWorkspace {...props} refresh={{ sequence: 0, type: 'initial' }} />);
+  const user = userEvent.setup();
+  await expandExampleUsers(user);
+  await user.click(screen.getByRole('treeitem', { name: /^GET \/api\/users/ }));
+  expect(await screen.findByText('user.email')).toBeInTheDocument();
+  rerender(<TargetWorkspace {...props} refresh={{ sequence: 1, type: 'target.endpoint.updated' }} />);
+  expect(await screen.findByText('user.name')).toBeInTheDocument();
+  expect(screen.getByText('4 occurrences')).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Open 43 in History' })).toBeInTheDocument();
+  expect(detailReads).toBe(2);
+  expect(requestReads).toBe(2);
+  expect(parameterReads).toBe(2);
+});
+
 test('independently filters site map text, scope, method, status family, and MIME metadata', async () => {
   render(<TargetWorkspace refresh={{ sequence: 0, type: 'initial' }} onOpenHistory={vi.fn()} onSendToRepeater={vi.fn()} />);
   const user = userEvent.setup();
@@ -280,17 +317,26 @@ test('moves tree focus to a fallback only when live replacement removes a focuse
   const user = userEvent.setup();
   await expandExampleUsers(user);
   const selected = screen.getByRole('treeitem', { name: /^GET \/api\/users/ });
-  selected.focus();
+  act(() => selected.focus());
   rerender(<SiteMapTree filters={noFilters} nodes={[tree[1]]} onSelect={onSelect} selectedId={null} />);
   expect(await screen.findByRole('treeitem', { name: /outside\.test/ })).toHaveFocus();
 
   rerender(<SiteMapTree filters={noFilters} nodes={tree} onSelect={onSelect} selectedId={null} />);
   const external = document.createElement('button');
   document.body.append(external);
-  external.focus();
+  act(() => external.focus());
   rerender(<SiteMapTree filters={noFilters} nodes={[tree[0]]} onSelect={onSelect} selectedId={null} />);
   expect(external).toHaveFocus();
   external.remove();
+});
+
+test('moves focus from the initially focusable tree item when live replacement removes it', async () => {
+  const { rerender } = render(<SiteMapTree filters={noFilters} nodes={tree} onSelect={vi.fn()} selectedId={null} />);
+  const initial = screen.getByRole('treeitem', { name: /example\.test/ });
+  act(() => initial.focus());
+  expect(initial).toHaveFocus();
+  rerender(<SiteMapTree filters={noFilters} nodes={[tree[1]]} onSelect={vi.fn()} selectedId={null} />);
+  expect(await screen.findByRole('treeitem', { name: /outside\.test/ })).toHaveFocus();
 });
 
 test('derives unique tree identities from repeated zero-ID branches', async () => {
@@ -317,7 +363,7 @@ test('uses owned groups and standard roving keyboard navigation in the site map'
   const treeElement = await screen.findByRole('tree', { name: 'Target site map' });
   const host = screen.getByRole('treeitem', { name: /example\.test/ });
   expect(host).toHaveAttribute('aria-owns');
-  host.focus();
+  act(() => host.focus());
   await user.keyboard('{ArrowRight}');
   expect(host).toHaveAttribute('aria-expanded', 'true');
   expect(document.getElementById(host.getAttribute('aria-owns')!)).toHaveAttribute('role', 'group');
