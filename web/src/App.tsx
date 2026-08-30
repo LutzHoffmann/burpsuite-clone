@@ -44,10 +44,16 @@ function isTargetRefreshType(type: string): type is TargetRefresh['type'] {
   return type === 'scope.changed' || type === 'target.endpoint.updated' || type.startsWith('target.rebuild.');
 }
 
-function canonicalIPv6(value: string): string | null {
+function canonicalIPLiteral(value: string): string | null {
   try {
     const hostname = new URL(`http://[${value}]`).hostname;
-    return hostname.startsWith('[') && hostname.endsWith(']') ? hostname.slice(1, -1).toLowerCase() : null;
+    if (!hostname.startsWith('[') || !hostname.endsWith(']')) return null;
+    const canonical = hostname.slice(1, -1).toLowerCase();
+    const mapped = canonical.match(/^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/);
+    if (!mapped) return canonical;
+    const high = Number.parseInt(mapped[1], 16);
+    const low = Number.parseInt(mapped[2], 16);
+    return `${high >>> 8}.${high & 0xff}.${low >>> 8}.${low & 0xff}`;
   } catch {
     return null;
   }
@@ -56,8 +62,8 @@ function canonicalIPv6(value: string): string | null {
 function normalizeHost(value: string): string {
   const host = value.trim().toLowerCase();
   if (!host) throw new Error('Host is empty');
-  const ipv6 = canonicalIPv6(host);
-  if (ipv6) return ipv6;
+  const ip = canonicalIPLiteral(host);
+  if (ip) return ip;
   if (/[@/\\?#%:[\]\s]/u.test(host)) throw new Error(`Invalid host ${value}`);
   try {
     const ascii = new URL(`http://${host}`).hostname.toLowerCase();
@@ -84,15 +90,15 @@ function splitAuthority(value: string, scheme: 'http' | 'https') {
   if (authority.startsWith('[')) {
     const match = authority.match(/^\[([^\]]+)\](?::(.*))?$/);
     if (!match) throw new Error(`Invalid host ${value}`);
-    const host = canonicalIPv6(match[1]);
+    const host = canonicalIPLiteral(match[1]);
     if (!host) throw new Error(`Invalid host ${value}`);
     return { host, port: match[2] === undefined ? defaultPort : parsePort(match[2]) };
   }
   if (authority.includes('[') || authority.includes(']')) throw new Error(`Invalid host ${value}`);
 
   if (authority.includes(':')) {
-    const ipv6 = canonicalIPv6(authority);
-    if (ipv6) return { host: ipv6, port: defaultPort };
+    const ip = canonicalIPLiteral(authority);
+    if (ip) return { host: ip, port: defaultPort };
     if (authority.indexOf(':') !== authority.lastIndexOf(':')) throw new Error(`Invalid host ${value}`);
     const separator = authority.lastIndexOf(':');
     return { host: normalizeHost(authority.slice(0, separator)), port: parsePort(authority.slice(separator + 1)) };

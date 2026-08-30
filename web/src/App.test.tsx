@@ -1,5 +1,6 @@
 import { act } from 'react';
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import '@testing-library/jest-dom/vitest';
 import { App } from './App';
 import { Inspector } from './components/Inspector';
@@ -346,22 +347,25 @@ test('sends a Target request through the existing Repeater flow', async () => {
 
 test('filters History by text and scope and renders valid sibling row controls', async () => {
   vi.stubGlobal('fetch', fullAppTargetFetchFixture());
+  const user = userEvent.setup();
   render(<App />);
   await screen.findByRole('button', { name: /Select POST target\.test\/from-target/ });
+  await screen.findByText('POST https://target.test/from-target');
 
-  fireEvent.change(screen.getByPlaceholderText('Filter requests'), { target: { value: 'needle' } });
+  const query = screen.getByPlaceholderText('Filter requests');
+  await user.type(query, 'needle');
   expect(screen.queryByRole('button', { name: /Select POST target\.test/ })).not.toBeInTheDocument();
   expect(screen.getByRole('button', { name: /Select GET outside\.test/ })).toBeInTheDocument();
-  fireEvent.change(screen.getByPlaceholderText('Filter requests'), { target: { value: '' } });
+  await user.clear(query);
 
   const scopeFilter = screen.getByRole('combobox', { name: 'History scope' });
-  fireEvent.change(scopeFilter, { target: { value: 'in' } });
+  await user.selectOptions(scopeFilter, 'in');
   expect(screen.getByText('In scope')).toBeInTheDocument();
   expect(screen.queryByText('Out of scope')).not.toBeInTheDocument();
-  fireEvent.change(scopeFilter, { target: { value: 'out' } });
+  await user.selectOptions(scopeFilter, 'out');
   expect(screen.getByText('Out of scope')).toBeInTheDocument();
   expect(screen.queryByText('In scope')).not.toBeInTheDocument();
-  fireEvent.change(scopeFilter, { target: { value: 'all' } });
+  await user.selectOptions(scopeFilter, 'all');
 
   for (const row of screen.getAllByRole('row').slice(1)) {
     expect(row.querySelector('button button')).toBeNull();
@@ -392,6 +396,21 @@ test('adds a bracketed IPv6 origin with its explicit port', async () => {
   await waitFor(() => expect(lastScopeUpdate()).toBeDefined());
   expect(lastScopeUpdate()?.rules).toEqual([
     expect.objectContaining({ scheme: 'https', hostPattern: '2001:db8::1', port: 8443, pathPrefix: '/' }),
+  ]);
+});
+
+test.each([
+  ['dotted IPv4-mapped IPv6 with the effective HTTPS port', '[::ffff:192.0.2.1]', 443],
+  ['hex IPv4-mapped IPv6 with an explicit port', '[::ffff:c000:0201]:8443', 8443],
+])('normalizes %s like Go net.IP.String', async (_name, host, expectedPort) => {
+  const item = { ...historyFixture(53, host, '/admin'), scheme: 'https', inScope: false };
+  vi.stubGlobal('fetch', historyAddToScopeFetchFixture({ item }));
+  render(<App />);
+  fireEvent.click(await screen.findByRole('button', { name: `Add ${host} to scope` }));
+
+  await waitFor(() => expect(lastScopeUpdate()).toBeDefined());
+  expect(lastScopeUpdate()?.rules).toEqual([
+    expect.objectContaining({ scheme: 'https', hostPattern: '192.0.2.1', port: expectedPort, pathPrefix: '/' }),
   ]);
 });
 
@@ -455,6 +474,21 @@ test.each([
 ])('deduplicates semantically equivalent include rules with %s', async (_name, host, scheme, equivalent) => {
   const scope = { version: 30, rules: [{ id: 11, enabled: true, action: 'include', ...equivalent }] } as ScopeState;
   const fetchMock = historyAddToScopeFetchFixture({ item: { ...historyFixture(62, host, '/path'), scheme }, scope });
+  vi.stubGlobal('fetch', fetchMock);
+  render(<App />);
+  fireEvent.click(await screen.findByRole('button', { name: `Add ${host} to scope` }));
+
+  await waitFor(() => expect(countFetches(fetchMock, '/api/scope/rules')).toBe(1));
+  expect(countFetches(fetchMock, '/api/scope/rules', 'PUT')).toBe(0);
+  expect(lastScopeUpdate()).toBeUndefined();
+});
+
+test('deduplicates an IPv4-mapped IPv6 origin against an existing IPv4 include rule', async () => {
+  const host = '[::ffff:192.0.2.1]:8443';
+  const scope: ScopeState = { version: 31, rules: [
+    { id: 12, enabled: true, action: 'include', scheme: 'https', hostPattern: '192.0.2.1', port: 8443, pathPrefix: '/' },
+  ] };
+  const fetchMock = historyAddToScopeFetchFixture({ item: { ...historyFixture(63, host, '/path'), scheme: 'https' }, scope });
   vi.stubGlobal('fetch', fetchMock);
   render(<App />);
   fireEvent.click(await screen.findByRole('button', { name: `Add ${host} to scope` }));
