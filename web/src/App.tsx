@@ -1,13 +1,16 @@
 import { useEffect, useState } from 'react';
-import { Boxes, FileText, History, Network, Search, Send, SlidersHorizontal } from 'lucide-react';
+import { Boxes, FileText, History, Map, Network, Search, Send, SlidersHorizontal } from 'lucide-react';
 import {
+  ApiError,
   dropIntercept as dropInterceptAPI,
   forwardIntercept as forwardInterceptAPI,
   getExchange,
   getHistory,
   getInterceptConfig,
   getInterceptQueue,
+  getScopeState,
   getStatus,
+  replaceScopeRules,
   sendRepeater as sendRepeaterAPI,
   updateInterceptConfig,
 } from './api/client';
@@ -18,7 +21,8 @@ import { Inspector } from './components/Inspector';
 import { Repeater } from './components/Repeater';
 import { Settings } from './components/Settings';
 import { StatusBar } from './components/StatusBar';
-import type { Exchange, HistoryItem, InterceptConfig, InterceptItem, SendRequest, SendResult, StatusDTO } from './types';
+import { TargetWorkspace } from './components/TargetWorkspace';
+import type { Exchange, HistoryItem, InterceptConfig, InterceptItem, ScopeRule, SendRequest, SendResult, StatusDTO, TargetRefresh } from './types';
 
 const fallbackStatus: StatusDTO = {
   apiAddr: '127.0.0.1:9080',
@@ -36,6 +40,34 @@ const developmentFallback: HistoryItem[] = [{
 
 const emptyRepeaterRequest: SendRequest = { method: 'GET', url: '', headers: {}, body: '' };
 
+function isTargetRefreshType(type: string): type is TargetRefresh['type'] {
+  return type === 'scope.changed' || type === 'target.endpoint.updated' || type.startsWith('target.rebuild.');
+}
+
+function scopeRuleForOrigin(item: HistoryItem): ScopeRule {
+  const scheme = item.scheme.toLowerCase();
+  if (scheme !== 'http' && scheme !== 'https') throw new Error(`Unsupported scheme ${item.scheme}`);
+  const origin = new URL(`${scheme}://${item.host}`);
+  if (origin.username || origin.password || origin.pathname !== '/' || origin.search || origin.hash) throw new Error(`Invalid host ${item.host}`);
+  const hostname = origin.hostname.replace(/^\[|\]$/g, '').toLowerCase();
+  if (!hostname) throw new Error(`Invalid host ${item.host}`);
+  return {
+    id: 0,
+    enabled: true,
+    action: 'include',
+    scheme,
+    hostPattern: hostname,
+    port: origin.port ? Number(origin.port) : scheme === 'https' ? 443 : 80,
+    pathPrefix: '/',
+  };
+}
+
+function equivalentInclude(rule: ScopeRule, candidate: ScopeRule) {
+  return rule.enabled && rule.action === 'include' && rule.scheme === candidate.scheme
+    && rule.hostPattern.toLowerCase().replace(/^\[|\]$/g, '') === candidate.hostPattern
+    && rule.port === candidate.port && rule.pathPrefix === '/';
+}
+
 export function App() {
   const [status, setStatus] = useState<StatusDTO>(fallbackStatus);
   const [items, setItems] = useState<HistoryItem[]>([]);
@@ -46,7 +78,10 @@ export function App() {
   const [repeaterRequest, setRepeaterRequest] = useState<SendRequest>(emptyRepeaterRequest);
   const [repeaterResult, setRepeaterResult] = useState<SendResult | null>(null);
   const [apiErrors, setAPIErrors] = useState<Record<string, string | undefined>>({});
-  const [view, setView] = useState<'traffic' | 'settings'>('traffic');
+  const [view, setView] = useState<'traffic' | 'target' | 'settings'>('traffic');
+  const [historyQuery, setHistoryQuery] = useState('');
+  const [historyScope, setHistoryScope] = useState<'all' | 'in' | 'out'>('all');
+  const [targetRefresh, setTargetRefresh] = useState<TargetRefresh>({ sequence: 0, type: 'initial' });
 
   useEffect(() => {
     let active = true;
@@ -101,9 +136,11 @@ export function App() {
     void loadHistory();
     void loadIntercept();
     const disconnect = connectEvents((event) => {
-      if (event.type === 'history.entry.created' || event.type === 'history.entry.updated') void loadHistory();
-      if (event.type === 'proxy.status.changed') void loadStatus();
-      if (event.type.startsWith('intercept.item.') || event.type === 'settings.changed') void loadIntercept();
+      const eventType = event.type;
+      if (eventType === 'history.entry.created' || eventType === 'history.entry.updated') void loadHistory();
+      if (eventType === 'proxy.status.changed') void loadStatus();
+      if (eventType.startsWith('intercept.item.') || eventType === 'settings.changed') void loadIntercept();
+      if (isTargetRefreshType(eventType)) setTargetRefresh((refresh) => ({ sequence: refresh.sequence + 1, type: eventType }));
     });
     return () => {
       active = false;
@@ -188,6 +225,30 @@ export function App() {
     }
   };
 
+  const addOriginToScope = async (item: HistoryItem) => {
+    try {
+      const candidate = scopeRuleForOrigin(item);
+      const current = await getScopeState();
+      if (current.rules.some((rule) => equivalentInclude(rule, candidate))) {
+        setAPIErrors((errors) => ({ ...errors, scope: undefined }));
+        return;
+      }
+      await replaceScopeRules(current.version, [...current.rules, candidate]);
+      setAPIErrors((errors) => ({ ...errors, scope: undefined }));
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 409) {
+        try {
+          await getScopeState();
+          setAPIErrors((errors) => ({ ...errors, scope: 'Add to scope failed: Scope changed in another session. Reloaded the latest scope; review and try again.' }));
+        } catch (reloadError) {
+          setAPIErrors((errors) => ({ ...errors, scope: `Add to scope failed: Scope changed and reload failed: ${reloadError instanceof Error ? reloadError.message : 'request failed'}` }));
+        }
+        return;
+      }
+      setAPIErrors((errors) => ({ ...errors, scope: `Add to scope failed: ${error instanceof Error ? error.message : 'request failed'}` }));
+    }
+  };
+
   return (
     <main className="app-shell">
       <StatusBar status={status} />
@@ -195,19 +256,27 @@ export function App() {
         <nav className="navigation" aria-label="Tools">
           <button className={`nav-item ${view === 'traffic' ? 'active' : ''}`} onClick={() => setView('traffic')} type="button"><Network size={17} />Traffic</button>
           <button className="nav-item" type="button"><History size={17} />History</button>
+          <button className={`nav-item ${view === 'target' ? 'active' : ''}`} onClick={() => setView('target')} type="button"><Map size={17} />Target</button>
           <button className="nav-item" type="button"><Send size={17} />Repeater</button>
           <button className="nav-item" type="button"><Boxes size={17} />Extensions</button>
           <div className="nav-spacer" />
           <button className={`nav-item ${view === 'settings' ? 'active' : ''}`} onClick={() => setView('settings')} type="button"><SlidersHorizontal size={17} />Settings</button>
         </nav>
 
-        <section className="history-panel" aria-label="Request history">
+        {view === 'target' ? <TargetWorkspace
+          refresh={targetRefresh}
+          onOpenHistory={(id) => { setSelectedId(id); setView('traffic'); }}
+          onSendToRepeater={(id) => { setView('traffic'); void sendHistoryToRepeater(id); }}
+        /> : <><section className="history-panel" aria-label="Request history">
           <div className="panel-heading">
             <div><span className="eyebrow">Capture</span><h1>Requests</h1></div>
             <button className="icon-button" aria-label="Filter history" type="button"><SlidersHorizontal size={16} /></button>
           </div>
-          <label className="search"><Search size={15} /><input placeholder="Filter requests" /></label>
-          <HistoryTable items={items} selectedId={selectedId} onSelect={setSelectedId} onSendToRepeater={(id) => void sendHistoryToRepeater(id)} />
+          <div className="history-controls">
+            <label className="search"><Search size={15} /><input onChange={(event) => setHistoryQuery(event.target.value)} placeholder="Filter requests" value={historyQuery} /></label>
+            <label className="scope-filter"><span>Scope</span><select aria-label="History scope" onChange={(event) => setHistoryScope(event.target.value as 'all' | 'in' | 'out')} value={historyScope}><option value="all">All</option><option value="in">In</option><option value="out">Out</option></select></label>
+          </div>
+          <HistoryTable items={items} selectedId={selectedId} query={historyQuery} scopeFilter={historyScope} onSelect={setSelectedId} onSendToRepeater={(id) => void sendHistoryToRepeater(id)} onAddOriginToScope={(item) => void addOriginToScope(item)} />
         </section>
 
         <section className="inspector-panel" aria-label="Exchange inspector">
@@ -236,7 +305,7 @@ export function App() {
             onDrop={(id) => void dropIntercept(id)}
           />
           <Repeater initialRequest={repeaterRequest} result={repeaterResult} onSend={(request) => void sendRepeater(request)} />
-        </section>
+        </section></>}
       </div>
     </main>
   );

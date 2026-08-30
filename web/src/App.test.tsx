@@ -1,10 +1,118 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act } from 'react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import '@testing-library/jest-dom/vitest';
 import { App } from './App';
 import { Inspector } from './components/Inspector';
+import type { HistoryItem, ScopeState, TargetTreeNode } from './types';
+
+type RecordedSocket = {
+  close: ReturnType<typeof vi.fn>;
+  emit: (type: string) => void;
+};
+
+let recordedSockets: RecordedSocket[] = [];
+let scopeUpdates: Array<{ version: number; rules: unknown[] }> = [];
+
+function installFakeEventSocket(): RecordedSocket {
+  const listeners: Array<(event: MessageEvent) => void> = [];
+  const socket: RecordedSocket = {
+    close: vi.fn(),
+    emit: (type) => act(() => listeners.forEach((listener) => listener({ data: JSON.stringify({ type, data: {} }) } as MessageEvent))),
+  };
+  class FakeWebSocket {
+    close = socket.close;
+    addEventListener(type: string, listener: (event: MessageEvent) => void) {
+      if (type === 'message') listeners.push(listener);
+    }
+  }
+  vi.stubGlobal('WebSocket', FakeWebSocket);
+  recordedSockets.push(socket);
+  return socket;
+}
+
+const targetTreeFixture: TargetTreeNode[] = [{
+  id: 7, scheme: 'https', host: 'target.test', port: 443, path: '/from-target', method: 'GET', inScope: true,
+  statuses: [200], requestMimes: ['text/plain'], responseMimes: ['text/plain'], count: 1,
+  lastSeen: '2026-08-20T10:05:00Z', children: [],
+}];
+
+const scopeFixture: ScopeState = { version: 12, rules: [] };
+
+function strictBaseResponse(path: string, history: HistoryItem[]) {
+  if (path === '/api/status') return jsonResponse(statusFixture);
+  if (path === '/api/history') return jsonResponse(history);
+  if (path === '/api/intercept/queue') return jsonResponse([]);
+  if (path === '/api/intercept/config') return jsonResponse({ enabled: false, rules: [] });
+  const match = path.match(/^\/api\/history\/(\d+)$/);
+  if (match) {
+    const item = history.find(({ id }) => id === Number(match[1]));
+    if (item) return jsonResponse({ ...exchangeFixture(item.id, item.host, item.path, `response ${item.id}`), ...item });
+  }
+  return null;
+}
+
+function fullAppTargetFetchFixture(): ReturnType<typeof vi.fn> {
+  const history = [
+    { ...historyFixture(42, 'target.test', '/from-target'), query: 'q=1', inScope: true },
+    { ...historyFixture(43, 'outside.test', '/public'), method: 'GET', query: 'token=needle', inScope: false },
+  ];
+  return vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const path = new URL(String(input), 'http://localhost').pathname;
+    const base = strictBaseResponse(path, history);
+    if (base) return base;
+    if (path === '/api/scope/rules' && (!init?.method || init.method === 'GET')) return jsonResponse(scopeFixture);
+    if (path === '/api/target/tree') return jsonResponse(targetTreeFixture);
+    if (path === '/api/target/rebuild' && (!init?.method || init.method === 'GET')) {
+      return jsonResponse({ id: 3, scopeVersion: 12, activeScopeVersion: 12, status: 'building', processed: 2, total: 5, error: '' });
+    }
+    if (path === '/api/target/endpoints/7') return jsonResponse({
+      id: 7, scheme: 'https', host: 'target.test', port: 443, path: '/from-target', method: 'GET', inScope: true,
+      firstSeen: '2026-08-20T10:00:00Z', lastSeen: '2026-08-20T10:05:00Z', count: 1, statuses: [200],
+      requestMimes: ['text/plain'], responseMimes: ['text/plain'], parseDiagnostics: [], errorSeen: false, latestExchangeId: 43,
+    });
+    if (path === '/api/target/endpoints/7/requests') return jsonResponse([{ exchangeId: 43, startedAt: '2026-08-20T10:05:00Z', status: 200, error: false }]);
+    if (path === '/api/target/endpoints/7/parameters') return jsonResponse([]);
+    throw new Error(`Unexpected request: ${init?.method ?? 'GET'} ${path}`);
+  });
+}
+
+function countFetches(fetchMock: ReturnType<typeof vi.fn>, path: string, method = 'GET') {
+  return fetchMock.mock.calls.filter(([input, init]) => {
+    const requestPath = new URL(String(input), 'http://localhost').pathname;
+    return requestPath === path && (init?.method ?? 'GET') === method;
+  }).length;
+}
+
+function historyAddToScopeFetchFixture(options: { item?: HistoryItem; scope?: ScopeState; conflict?: boolean } = {}): ReturnType<typeof vi.fn> {
+  const item = options.item ?? ({ ...historyFixture(51, 'Example.TEST', '/admin'), scheme: 'https', inScope: false } as HistoryItem);
+  const history = [item];
+  let scopeReads = 0;
+  return vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const path = new URL(String(input), 'http://localhost').pathname;
+    const base = strictBaseResponse(path, history);
+    if (base) return base;
+    if (path === '/api/scope/rules' && (!init?.method || init.method === 'GET')) {
+      scopeReads += 1;
+      return jsonResponse({ ...(options.scope ?? scopeFixture), version: (options.scope ?? scopeFixture).version + (scopeReads > 1 ? 1 : 0) });
+    }
+    if (path === '/api/scope/rules' && init?.method === 'PUT') {
+      scopeUpdates.push(JSON.parse(String(init.body)));
+      if (options.conflict) return new Response('{}', { status: 409, statusText: 'Conflict' });
+      return jsonResponse({ version: (options.scope ?? scopeFixture).version + 1, rules: scopeUpdates.at(-1)?.rules ?? [] });
+    }
+    throw new Error(`Unexpected request: ${init?.method ?? 'GET'} ${path}`);
+  });
+}
+
+function lastScopeUpdate() {
+  return scopeUpdates.at(-1);
+}
 
 beforeEach(() => {
+	recordedSockets = [];
+  scopeUpdates = [];
 	vi.stubGlobal('fetch', vi.fn(() => new Promise<Response>(() => undefined)));
+  installFakeEventSocket();
 });
 
 afterEach(() => {
@@ -119,7 +227,7 @@ test('sends a selected history request to repeater through the api', async () =>
 
   render(<App />);
   const rowHost = await screen.findByText('replay.test');
-  fireEvent.doubleClick(rowHost.closest('button')!);
+  fireEvent.doubleClick(rowHost.closest('[role="row"]')!.querySelector('button')!);
   await waitFor(() => expect(screen.getByLabelText('URL')).toHaveValue('https://replay.test/submit'));
   fireEvent.click(screen.getByRole('button', { name: 'Send' }));
   expect(await screen.findByDisplayValue('real response')).toBeInTheDocument();
@@ -156,6 +264,127 @@ test('loads intercept queue and calls edit-forward and drop api actions', async 
   fireEvent.click(screen.getByRole('button', { name: 'Drop two' }));
   await waitFor(() => expect(actions).toHaveLength(2));
   expect(actions[1].url).toBe('/api/intercept/two/drop');
+});
+
+test('opens Target and routes endpoint and rebuild events without reloading History', async () => {
+  const fetchMock = fullAppTargetFetchFixture();
+  vi.stubGlobal('fetch', fetchMock);
+  const socket = recordedSockets[0];
+
+  render(<App />);
+  fireEvent.click(screen.getByRole('button', { name: 'Target' }));
+  expect(await screen.findByRole('heading', { name: 'Site Map' })).toBeInTheDocument();
+  const historyLoads = countFetches(fetchMock, '/api/history');
+  const treeLoads = countFetches(fetchMock, '/api/target/tree');
+  const rebuildLoads = countFetches(fetchMock, '/api/target/rebuild');
+
+  socket.emit('target.endpoint.updated');
+  await waitFor(() => expect(countFetches(fetchMock, '/api/target/tree')).toBe(treeLoads + 1));
+  expect(countFetches(fetchMock, '/api/history')).toBe(historyLoads);
+  expect(countFetches(fetchMock, '/api/target/rebuild')).toBe(rebuildLoads);
+
+  socket.emit('target.rebuild.progress');
+  await waitFor(() => expect(countFetches(fetchMock, '/api/target/rebuild')).toBe(rebuildLoads + 1));
+  expect(countFetches(fetchMock, '/api/history')).toBe(historyLoads);
+  expect(countFetches(fetchMock, '/api/target/tree')).toBe(treeLoads + 1);
+});
+
+test('opens a Target request in the existing History inspector', async () => {
+  vi.stubGlobal('fetch', fullAppTargetFetchFixture());
+  render(<App />);
+  fireEvent.click(screen.getByRole('button', { name: 'Target' }));
+  fireEvent.click(await screen.findByRole('treeitem', { name: /^GET \/from-target/ }));
+  fireEvent.click(await screen.findByRole('button', { name: 'Open 43 in History' }));
+
+  expect(screen.queryByRole('main', { name: 'Target workspace' })).not.toBeInTheDocument();
+  await waitFor(() => expect(screen.getByRole('button', { name: /Select GET outside\.test\/public/ })).toHaveAttribute('aria-pressed', 'true'));
+  fireEvent.click(screen.getByRole('tab', { name: 'Body' }));
+  expect(await screen.findByText(/response 43/)).toBeInTheDocument();
+});
+
+test('sends a Target request through the existing Repeater flow', async () => {
+  vi.stubGlobal('fetch', fullAppTargetFetchFixture());
+  render(<App />);
+  fireEvent.click(screen.getByRole('button', { name: 'Target' }));
+  fireEvent.click(await screen.findByRole('treeitem', { name: /^GET \/from-target/ }));
+  fireEvent.click(await screen.findByRole('button', { name: 'Send 43 to Repeater' }));
+
+  expect(screen.queryByRole('main', { name: 'Target workspace' })).not.toBeInTheDocument();
+  await waitFor(() => expect(screen.getByLabelText('URL')).toHaveValue('https://outside.test/public?token=needle'));
+});
+
+test('filters History by text and scope and renders valid sibling row controls', async () => {
+  vi.stubGlobal('fetch', fullAppTargetFetchFixture());
+  render(<App />);
+  await screen.findByRole('button', { name: /Select POST target\.test\/from-target/ });
+
+  fireEvent.change(screen.getByPlaceholderText('Filter requests'), { target: { value: 'needle' } });
+  expect(screen.queryByRole('button', { name: /Select POST target\.test/ })).not.toBeInTheDocument();
+  expect(screen.getByRole('button', { name: /Select GET outside\.test/ })).toBeInTheDocument();
+  fireEvent.change(screen.getByPlaceholderText('Filter requests'), { target: { value: '' } });
+
+  const scopeFilter = screen.getByRole('combobox', { name: 'History scope' });
+  fireEvent.change(scopeFilter, { target: { value: 'in' } });
+  expect(screen.getByText('In scope')).toBeInTheDocument();
+  expect(screen.queryByText('Out of scope')).not.toBeInTheDocument();
+  fireEvent.change(scopeFilter, { target: { value: 'out' } });
+  expect(screen.getByText('Out of scope')).toBeInTheDocument();
+  expect(screen.queryByText('In scope')).not.toBeInTheDocument();
+  fireEvent.change(scopeFilter, { target: { value: 'all' } });
+
+  for (const row of screen.getAllByRole('row').slice(1)) {
+    expect(row.querySelector('button button')).toBeNull();
+    expect(within(row).getAllByRole('button')).toHaveLength(2);
+  }
+});
+
+test('adds a normalized origin to scope with the latest version and effective HTTPS port', async () => {
+  const fetchMock = historyAddToScopeFetchFixture();
+  vi.stubGlobal('fetch', fetchMock);
+  render(<App />);
+  fireEvent.click(await screen.findByRole('button', { name: 'Add Example.TEST to scope' }));
+
+  await waitFor(() => expect(lastScopeUpdate()).toBeDefined());
+  expect(lastScopeUpdate()).toEqual({
+    version: 12,
+    rules: [expect.objectContaining({ enabled: true, action: 'include', scheme: 'https', hostPattern: 'example.test', port: 443, pathPrefix: '/' })],
+  });
+  expect(countFetches(fetchMock, '/api/scope/rules', 'PUT')).toBe(1);
+});
+
+test('adds a bracketed IPv6 origin with its explicit port', async () => {
+  const item = { ...historyFixture(52, '[2001:DB8::1]:8443', '/admin'), scheme: 'https', inScope: false } as HistoryItem;
+  vi.stubGlobal('fetch', historyAddToScopeFetchFixture({ item }));
+  render(<App />);
+  fireEvent.click(await screen.findByRole('button', { name: 'Add [2001:DB8::1]:8443 to scope' }));
+
+  await waitFor(() => expect(lastScopeUpdate()).toBeDefined());
+  expect(lastScopeUpdate()?.rules).toEqual([
+    expect.objectContaining({ scheme: 'https', hostPattern: '2001:db8::1', port: 8443, pathPrefix: '/' }),
+  ]);
+});
+
+test('does not add an equivalent enabled include rule', async () => {
+  const scope: ScopeState = { version: 21, rules: [{ id: 9, enabled: true, action: 'include', scheme: 'https', hostPattern: 'example.test', port: 443, pathPrefix: '/' }] };
+  const fetchMock = historyAddToScopeFetchFixture({ scope });
+  vi.stubGlobal('fetch', fetchMock);
+  render(<App />);
+  fireEvent.click(await screen.findByRole('button', { name: 'Add Example.TEST to scope' }));
+
+  await waitFor(() => expect(countFetches(fetchMock, '/api/scope/rules')).toBe(1));
+  expect(countFetches(fetchMock, '/api/scope/rules', 'PUT')).toBe(0);
+  expect(lastScopeUpdate()).toBeUndefined();
+});
+
+test('reloads scope once after a 409, shows an error, and does not retry the write', async () => {
+  const fetchMock = historyAddToScopeFetchFixture({ conflict: true });
+  vi.stubGlobal('fetch', fetchMock);
+  render(<App />);
+  fireEvent.click(await screen.findByRole('button', { name: 'Add Example.TEST to scope' }));
+
+  expect(await screen.findByRole('status')).toHaveTextContent(/scope changed.*reload/i);
+  expect(countFetches(fetchMock, '/api/scope/rules')).toBe(2);
+  expect(countFetches(fetchMock, '/api/scope/rules', 'PUT')).toBe(1);
 });
 
 const statusFixture = {
