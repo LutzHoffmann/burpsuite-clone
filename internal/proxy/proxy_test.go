@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -14,18 +15,447 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/lutzifer/burpsuite-clone/internal/api"
 	"github.com/lutzifer/burpsuite-clone/internal/certs"
 	"github.com/lutzifer/burpsuite-clone/internal/events"
 	"github.com/lutzifer/burpsuite-clone/internal/intercept"
 	"github.com/lutzifer/burpsuite-clone/internal/scope"
 	"github.com/lutzifer/burpsuite-clone/internal/store"
+	"github.com/lutzifer/burpsuite-clone/internal/target"
 )
+
+func TestTargetScopeEndToEnd(t *testing.T) {
+	harness := newTargetHarness(t)
+	harness.ReplaceScope([]scope.Rule{{
+		Enabled: true, Action: scope.ActionInclude, HostPattern: "localhost", PathPrefix: "/allowed",
+	}})
+	harness.WaitForRebuild()
+
+	allowedHTTP := harness.HTTPURL("/allowed?q=private-query-value")
+	outsideHTTP := harness.HTTPURL("/outside?secret=private-outside-value")
+	allowedHTTPS := harness.HTTPSURL("localhost", "/allowed")
+	harness.ProxyGET(allowedHTTP)
+	harness.ProxyGET(outsideHTTP)
+	harness.ProxyGET(allowedHTTPS)
+
+	history := harness.History()
+	assertHistoryScope(t, history, "http", "/allowed", true, 1)
+	assertHistoryScope(t, history, "http", "/outside", false, 1)
+	assertHistoryScope(t, history, "https", "/allowed", true, 1)
+	tree := harness.TargetTree()
+	assertTreeContains(t, tree, "http", "/allowed")
+	assertTreeContains(t, tree, "https", "/allowed")
+	assertTreeOmits(t, tree, "/outside")
+	assertParameterNames(t, harness.ParametersFor(allowedHTTP), "q")
+
+	harness.EnableInterception()
+	harness.ProxyGET(outsideHTTP)
+	if queued := harness.intercept.Queue().List(); len(queued) != 0 {
+		t.Fatalf("out-of-scope request entered interception queue: %#v", queued)
+	}
+	history = harness.History()
+	if len(history) != 4 || history[0].Path != "/outside" || history[0].Intercepted {
+		t.Fatalf("bypassed request was not forwarded and persisted: %#v", history)
+	}
+
+	harness.ReplaceScope([]scope.Rule{{
+		Enabled: true, Action: scope.ActionInclude, HostPattern: "localhost", PathPrefix: "/",
+	}})
+	harness.WaitForRebuild()
+	tree = harness.TargetTree()
+	assertTreeContains(t, tree, "http", "/allowed")
+	assertTreeContains(t, tree, "https", "/allowed")
+	assertTreeContains(t, tree, "http", "/outside")
+
+	harness.ReplaceScope([]scope.Rule{{
+		Enabled: true, Action: scope.ActionInclude, HostPattern: "localhost", PathPrefix: "/outside",
+	}})
+	harness.WaitForRebuild()
+	tree = harness.TargetTree()
+	assertTreeContains(t, tree, "http", "/outside")
+	assertTreeOmits(t, tree, "/allowed")
+	assertHistoryScope(t, harness.History(), "http", "/allowed", true, 1)
+	assertHistoryScope(t, harness.History(), "http", "/outside", false, 1)
+	assertHistoryScope(t, harness.History(), "https", "/allowed", true, 1)
+}
+
+type targetHarness struct {
+	t             *testing.T
+	repository    *store.SQLiteStore
+	target        *target.Service
+	intercept     *intercept.Controller
+	httpTarget    *httptest.Server
+	httpsTarget   *httptest.Server
+	apiServer     *httptest.Server
+	apiClient     *http.Client
+	proxyListener net.Listener
+	proxyDone     chan error
+	client        *http.Client
+	scopeVersion  int64
+}
+
+func newTargetHarness(t *testing.T) *targetHarness {
+	t.Helper()
+	repository, err := store.OpenSQLite(filepath.Join(t.TempDir(), "project.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, err := repository.LoadScopeState(context.Background())
+	if err != nil {
+		_ = repository.Close()
+		t.Fatal(err)
+	}
+	compiled, err := scope.Compile(state.Version, state.Rules)
+	if err != nil {
+		_ = repository.Close()
+		t.Fatal(err)
+	}
+
+	handler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		_, _ = w.Write([]byte("target response"))
+	})
+	httpTarget := httptest.NewServer(handler)
+	httpsTarget := httptest.NewTLSServer(handler)
+	hub := events.NewHub()
+	manager := scope.NewManager(compiled)
+	targetService := target.NewService(repository, manager, hub, target.Limits{
+		MaxJSONDepth: 16, MaxFields: 1000, MaxMultipartFields: 100,
+	})
+	if err := targetService.Recover(context.Background()); err != nil {
+		httpTarget.Close()
+		httpsTarget.Close()
+		_ = repository.Close()
+		t.Fatal(err)
+	}
+	authority, err := certs.LoadOrCreateAuthority(t.TempDir())
+	if err != nil {
+		targetService.Close()
+		httpTarget.Close()
+		httpsTarget.Close()
+		_ = repository.Close()
+		t.Fatal(err)
+	}
+	controller := intercept.NewController(
+		intercept.NewQueue(5*time.Second), false, []intercept.Rule{{Enabled: true}},
+	)
+	apiServer := httptest.NewServer(api.NewServer(api.Config{
+		Store: repository, Authority: authority, Events: hub, Intercept: controller, Target: targetService,
+		APIAddr: "127.0.0.1:9080", ProxyAddr: "127.0.0.1:8080", MaxBodyBytes: 4096,
+	}).Handler())
+	listener := listenForTest(t)
+	upstream := httpsTarget.Client().Transport.(*http.Transport).Clone()
+	upstreamTLS := upstream.TLSClientConfig.Clone()
+	upstreamTLS.ServerName = "example.com"
+	upstream.TLSClientConfig = upstreamTLS
+	proxyServer := NewServer(Config{
+		Store: repository, BodyLimitBytes: 4096, Transport: upstream, Authority: authority,
+		Events: hub, Intercept: controller, Scope: manager, Target: targetService,
+	})
+	done := make(chan error, 1)
+	go func() { done <- proxyServer.Serve(listener) }()
+
+	harness := &targetHarness{
+		t: t, repository: repository, target: targetService, intercept: controller,
+		httpTarget: httpTarget, httpsTarget: httpsTarget, apiServer: apiServer,
+		apiClient: apiServer.Client(), proxyListener: listener, proxyDone: done,
+		client: proxyClient(listener.Addr().String(), authority), scopeVersion: state.Version,
+	}
+	t.Cleanup(func() {
+		harness.client.CloseIdleConnections()
+		harness.apiClient.CloseIdleConnections()
+		harness.apiServer.Close()
+		_ = harness.proxyListener.Close()
+		select {
+		case <-harness.proxyDone:
+		case <-time.After(time.Second):
+			t.Error("proxy server did not stop")
+		}
+		harness.httpTarget.Close()
+		harness.httpsTarget.Close()
+		harness.target.Close()
+		if err := harness.repository.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+	return harness
+}
+
+func (h *targetHarness) ReplaceScope(rules []scope.Rule) {
+	h.t.Helper()
+	payload, err := json.Marshal(struct {
+		Version int64        `json:"version"`
+		Rules   []scope.Rule `json:"rules"`
+	}{Version: h.scopeVersion, Rules: rules})
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	response := h.apiRequest(http.MethodPut, "/api/scope/rules", bytes.NewReader(payload))
+	var state scope.State
+	if err := json.Unmarshal(response, &state); err != nil {
+		h.t.Fatalf("decode scope state: %v; body = %q", err, response)
+	}
+	h.scopeVersion = state.Version
+}
+
+func (h *targetHarness) ProxyGET(rawURL string) {
+	h.t.Helper()
+	before := len(h.History())
+	response, err := h.client.Get(rawURL)
+	if err != nil {
+		h.t.Fatalf("proxy GET %s: %v", rawURL, err)
+	}
+	body, readErr := io.ReadAll(response.Body)
+	closeErr := response.Body.Close()
+	if readErr != nil || closeErr != nil {
+		h.t.Fatalf("read proxy response for %s: read=%v close=%v", rawURL, readErr, closeErr)
+	}
+	if response.StatusCode != http.StatusOK || string(body) != "target response" {
+		h.t.Fatalf("proxy GET %s: status=%d body=%q", rawURL, response.StatusCode, body)
+	}
+	h.waitUntil("history persistence", func() bool { return len(h.History()) == before+1 })
+}
+
+func (h *targetHarness) HTTPURL(path string) string {
+	return strings.Replace(h.httpTarget.URL, "127.0.0.1", "localhost", 1) + path
+}
+
+func (h *targetHarness) HTTPSURL(host, path string) string {
+	h.t.Helper()
+	parsed := mustParseURL(h.t, h.httpsTarget.URL)
+	parsed.Host = net.JoinHostPort(host, parsed.Port())
+	parsed.Path = path
+	return parsed.String()
+}
+
+func (h *targetHarness) History() []store.HistoryItem {
+	h.t.Helper()
+	var history []store.HistoryItem
+	body := h.apiRequest(http.MethodGet, "/api/history", nil)
+	if err := json.Unmarshal(body, &history); err != nil {
+		h.t.Fatalf("decode History: %v; body = %q", err, body)
+	}
+	return history
+}
+
+func (h *targetHarness) TargetTree() []store.TargetTreeNode {
+	h.t.Helper()
+	var tree []store.TargetTreeNode
+	body := h.apiRequest(http.MethodGet, "/api/target/tree", nil)
+	if err := json.Unmarshal(body, &tree); err != nil {
+		h.t.Fatalf("decode Target tree: %v; body = %q", err, body)
+	}
+	return tree
+}
+
+func (h *targetHarness) ParametersFor(rawURL string) []store.TargetParameter {
+	h.t.Helper()
+	parsed := mustParseURL(h.t, rawURL)
+	endpointID := targetEndpointIDForURL(h.TargetTree(), parsed)
+	if endpointID == 0 {
+		h.t.Fatalf("no GET endpoint for %s in Target tree: %#v", rawURL, h.TargetTree())
+	}
+	body := h.apiRequest(http.MethodGet, "/api/target/endpoints/"+strconv.FormatInt(endpointID, 10)+"/parameters", nil)
+	var wire []map[string]json.RawMessage
+	if err := json.Unmarshal(body, &wire); err != nil {
+		h.t.Fatalf("decode parameter wire payload: %v; body = %q", err, body)
+	}
+	for _, parameter := range wire {
+		if value, exists := parameter["value"]; exists {
+			h.t.Fatalf("parameter value field leaked: %s (%s)", body, value)
+		}
+	}
+	for _, values := range parsed.Query() {
+		for _, value := range values {
+			if value != "" && bytes.Contains(body, []byte(value)) {
+				h.t.Fatalf("parameter value %q leaked: %s", value, body)
+			}
+		}
+	}
+	var parameters []store.TargetParameter
+	if err := json.Unmarshal(body, &parameters); err != nil {
+		h.t.Fatalf("decode parameters: %v; body = %q", err, body)
+	}
+	return parameters
+}
+
+func (h *targetHarness) WaitForRebuild() {
+	h.t.Helper()
+	var last store.RebuildStatus
+	timer := time.NewTimer(3 * time.Second)
+	ticker := time.NewTicker(5 * time.Millisecond)
+	defer timer.Stop()
+	defer ticker.Stop()
+	for {
+		body := h.apiRequest(http.MethodGet, "/api/target/rebuild", nil)
+		if err := json.Unmarshal(body, &last); err != nil {
+			h.t.Fatalf("decode rebuild status: %v; body = %q", err, body)
+		}
+		if last.Status == "active" && last.ScopeVersion == h.scopeVersion && last.ActiveScopeVersion == h.scopeVersion {
+			return
+		}
+		select {
+		case <-ticker.C:
+		case <-timer.C:
+			h.t.Fatalf("timed out waiting for Target rebuild; status=%#v History=%#v TargetTree=%#v", last, h.History(), h.TargetTree())
+		}
+	}
+}
+
+func (h *targetHarness) EnableInterception() {
+	h.intercept.Update(intercept.ControllerState{Enabled: true, Rules: []intercept.Rule{{Enabled: true}}})
+}
+
+func (h *targetHarness) apiRequest(method, path string, body io.Reader) []byte {
+	h.t.Helper()
+	request, err := http.NewRequest(method, h.apiServer.URL+path, body)
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	if body != nil {
+		request.Header.Set("Content-Type", "application/json")
+	}
+	response, err := h.apiClient.Do(request)
+	if err != nil {
+		h.t.Fatalf("API %s %s: %v", method, path, err)
+	}
+	responseBody, readErr := io.ReadAll(response.Body)
+	closeErr := response.Body.Close()
+	if readErr != nil || closeErr != nil {
+		h.t.Fatalf("read API %s %s: read=%v close=%v", method, path, readErr, closeErr)
+	}
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		h.t.Fatalf("API %s %s: status=%d body=%q", method, path, response.StatusCode, responseBody)
+	}
+	return responseBody
+}
+
+func (h *targetHarness) waitUntil(operation string, ready func() bool) {
+	h.t.Helper()
+	timer := time.NewTimer(3 * time.Second)
+	ticker := time.NewTicker(5 * time.Millisecond)
+	defer timer.Stop()
+	defer ticker.Stop()
+	for {
+		if ready() {
+			return
+		}
+		select {
+		case <-ticker.C:
+		case <-timer.C:
+			h.t.Fatalf("timed out waiting for %s; History=%#v TargetTree=%#v", operation, h.History(), h.TargetTree())
+		}
+	}
+}
+
+func assertHistoryScope(t *testing.T, history []store.HistoryItem, scheme, path string, inScope bool, version int64) {
+	t.Helper()
+	found := false
+	for _, item := range history {
+		if item.Scheme != scheme || item.Path != path {
+			continue
+		}
+		found = true
+		if item.InScope != inScope || item.ScopeVersion != version || (inScope && item.ScopeRuleID == nil) || (!inScope && item.ScopeRuleID != nil) {
+			t.Fatalf("History scope for %s %s is incorrect: item=%#v History=%#v", scheme, path, item, history)
+		}
+	}
+	if !found {
+		t.Fatalf("History has no %s %s entry: %#v", scheme, path, history)
+	}
+}
+
+func assertTreeContains(t *testing.T, tree []store.TargetTreeNode, scheme, path string) {
+	t.Helper()
+	observed := targetEndpointPaths(tree)
+	wanted := "GET " + scheme + " " + path
+	for _, endpoint := range observed {
+		if endpoint == wanted {
+			return
+		}
+	}
+	t.Fatalf("Target tree does not contain %q; endpoints=%#v tree=%#v", wanted, observed, tree)
+}
+
+func assertTreeOmits(t *testing.T, tree []store.TargetTreeNode, path string) {
+	t.Helper()
+	observed := targetEndpointPaths(tree)
+	for _, endpoint := range observed {
+		if strings.HasSuffix(endpoint, " "+path) {
+			t.Fatalf("Target tree contains omitted path %q; endpoints=%#v tree=%#v", path, observed, tree)
+		}
+	}
+}
+
+func assertParameterNames(t *testing.T, parameters []store.TargetParameter, names ...string) {
+	t.Helper()
+	observed := make([]string, len(parameters))
+	for index, parameter := range parameters {
+		observed[index] = parameter.Name
+	}
+	if fmt.Sprint(observed) != fmt.Sprint(names) {
+		t.Fatalf("parameter names=%#v, want=%#v; parameters=%#v", observed, names, parameters)
+	}
+}
+
+func targetEndpointPaths(tree []store.TargetTreeNode) []string {
+	var endpoints []string
+	var visit func([]store.TargetTreeNode, string, string)
+	visit = func(nodes []store.TargetTreeNode, scheme, path string) {
+		for _, node := range nodes {
+			nodeScheme := scheme
+			if node.Scheme != "" {
+				nodeScheme = node.Scheme
+			}
+			nodePath := path
+			if node.Path != "" {
+				nodePath += "/" + node.Path
+			}
+			if node.Method != "" {
+				endpoints = append(endpoints, node.Method+" "+nodeScheme+" "+nodePath)
+			}
+			visit(node.Children, nodeScheme, nodePath)
+		}
+	}
+	visit(tree, "", "")
+	return endpoints
+}
+
+func targetEndpointIDForURL(tree []store.TargetTreeNode, targetURL *url.URL) int64 {
+	port, _ := strconv.Atoi(targetURL.Port())
+	var visit func([]store.TargetTreeNode, string, string, int) int64
+	visit = func(nodes []store.TargetTreeNode, scheme, path string, inheritedPort int) int64 {
+		for _, node := range nodes {
+			nodeScheme, nodePort := scheme, inheritedPort
+			if node.Scheme != "" {
+				nodeScheme = node.Scheme
+			}
+			if node.Port != 0 {
+				nodePort = node.Port
+			}
+			nodePath := path
+			if node.Path != "" {
+				nodePath += "/" + node.Path
+			}
+			if node.ID != 0 && node.Method == http.MethodGet && nodeScheme == targetURL.Scheme && nodePort == port && nodePath == targetURL.Path {
+				return node.ID
+			}
+			if id := visit(node.Children, nodeScheme, nodePath, nodePort); id != 0 {
+				return id
+			}
+		}
+		return 0
+	}
+	return visit(tree, "", "", 0)
+}
 
 func TestProxyForwardsAndStoresOutOfScopeWithoutIntercepting(t *testing.T) {
 	rules, err := scope.Compile(1, []scope.Rule{{
