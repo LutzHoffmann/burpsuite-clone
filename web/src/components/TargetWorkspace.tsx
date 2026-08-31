@@ -43,10 +43,15 @@ export function TargetWorkspace({ refresh, onOpenHistory, onSendToRepeater }: Ta
   const scopeGeneration = useRef(0);
   const treeGeneration = useRef(0);
   const statusGeneration = useRef(0);
-  const mounted = useRef(true);
+  const lifecycleGeneration = useRef(0);
   const [detailAttempt, setDetailAttempt] = useState(0);
 
-  useEffect(() => () => { mounted.current = false; }, []);
+  useEffect(() => {
+    const lifecycle = ++lifecycleGeneration.current;
+    return () => {
+      if (lifecycleGeneration.current === lifecycle) lifecycleGeneration.current += 1;
+    };
+  }, []);
 
   const clearDetail = () => {
     detailGeneration.current += 1;
@@ -64,31 +69,32 @@ export function TargetWorkspace({ refresh, onOpenHistory, onSendToRepeater }: Ta
   };
 
   useEffect(() => {
+    const lifecycle = lifecycleGeneration.current;
     const loadScope = () => {
       const generation = ++scopeGeneration.current;
       setLoadError('');
       void getScopeState().then((nextScope) => {
-        if (mounted.current && generation === scopeGeneration.current) setScope(nextScope);
+        if (lifecycle === lifecycleGeneration.current && generation === scopeGeneration.current) setScope(nextScope);
       }).catch((error) => {
-        if (mounted.current && generation === scopeGeneration.current) setLoadError(String(error));
+        if (lifecycle === lifecycleGeneration.current && generation === scopeGeneration.current) setLoadError(String(error));
       });
     };
     const loadTree = () => {
       const generation = ++treeGeneration.current;
       setLoadError('');
       void getTargetTree().then((nextTree) => {
-        if (mounted.current && generation === treeGeneration.current) replaceTree(nextTree);
+        if (lifecycle === lifecycleGeneration.current && generation === treeGeneration.current) replaceTree(nextTree);
       }).catch((error) => {
-        if (mounted.current && generation === treeGeneration.current) setLoadError(String(error));
+        if (lifecycle === lifecycleGeneration.current && generation === treeGeneration.current) setLoadError(String(error));
       });
     };
     const loadStatus = () => {
       const generation = ++statusGeneration.current;
       setLoadError('');
       void getRebuildStatus().then((nextStatus) => {
-        if (mounted.current && generation === statusGeneration.current) setStatus(nextStatus);
+        if (lifecycle === lifecycleGeneration.current && generation === statusGeneration.current) setStatus(nextStatus);
       }).catch((error) => {
-        if (mounted.current && generation === statusGeneration.current) setLoadError(String(error));
+        if (lifecycle === lifecycleGeneration.current && generation === statusGeneration.current) setLoadError(String(error));
       });
     };
 

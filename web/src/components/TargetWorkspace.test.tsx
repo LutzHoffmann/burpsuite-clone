@@ -1,7 +1,7 @@
 import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import '@testing-library/jest-dom/vitest';
-import { act } from 'react';
+import { act, StrictMode } from 'react';
 // @ts-expect-error Vitest executes this test in Node, while the web build excludes Node types.
 import { readFileSync } from 'node:fs';
 import type { ScopeState, TargetTreeNode } from '../types';
@@ -481,6 +481,50 @@ test('keeps scope and tree refreshes when back-to-back rebuild events supersede 
   expect(await screen.findByText('v9')).toBeInTheDocument();
   expect(screen.getByRole('treeitem', { name: /fresh\.test/ })).toBeInTheDocument();
   expect(await screen.findByText('latest rebuild failure')).toBeInTheDocument();
+  expect(screen.queryByText('2 / 3')).not.toBeInTheDocument();
+});
+
+test('keeps the second StrictMode lifecycle and back-to-back resource refreshes current', async () => {
+  const scopeResponses = [deferred<Response>(), deferred<Response>(), deferred<Response>()];
+  const treeResponses = [deferred<Response>(), deferred<Response>(), deferred<Response>()];
+  const statusResponses = [deferred<Response>(), deferred<Response>(), deferred<Response>(), deferred<Response>(), deferred<Response>()];
+  let scopeReads = 0;
+  let treeReads = 0;
+  let statusReads = 0;
+  vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+    const path = new URL(String(input), 'http://localhost').pathname;
+    if (path === '/api/scope/rules') return scopeResponses[scopeReads++]?.promise ?? Promise.reject(new Error(`Unexpected scope request ${scopeReads}`));
+    if (path === '/api/target/tree') return treeResponses[treeReads++]?.promise ?? Promise.reject(new Error(`Unexpected tree request ${treeReads}`));
+    if (path === '/api/target/rebuild') return statusResponses[statusReads++]?.promise ?? Promise.reject(new Error(`Unexpected status request ${statusReads}`));
+    throw new Error(`Unexpected request: ${path}`);
+  }));
+  const props = { onOpenHistory: vi.fn(), onSendToRepeater: vi.fn() };
+  const { rerender } = render(<StrictMode><TargetWorkspace {...props} refresh={{ sequence: 0, type: 'initial' }} /></StrictMode>);
+
+  scopeResponses[0].resolve(response({ version: 1, rules: [] }));
+  treeResponses[0].resolve(response([{ ...tree[0], host: 'discarded.test' }]));
+  statusResponses[0].resolve(response({ id: 4, scopeVersion: 1, activeScopeVersion: 1, status: 'building', processed: 1, total: 2, error: '' }));
+  scopeResponses[1].resolve(response({ version: 8, rules: [] }));
+  treeResponses[1].resolve(response([{ ...tree[0], host: 'strict.test' }]));
+  statusResponses[1].resolve(response({ id: 4, scopeVersion: 8, activeScopeVersion: 8, status: 'building', processed: 1, total: 2, error: '' }));
+
+  expect(await screen.findByText('v8')).toBeInTheDocument();
+  expect(screen.getByRole('treeitem', { name: /strict\.test/ })).toBeInTheDocument();
+  expect(screen.getByRole('status')).toHaveTextContent('1 / 2');
+  expect(screen.queryByText('discarded.test')).not.toBeInTheDocument();
+
+  rerender(<StrictMode><TargetWorkspace {...props} refresh={{ sequence: 1, type: 'scope.changed' }} /></StrictMode>);
+  rerender(<StrictMode><TargetWorkspace {...props} refresh={{ sequence: 2, type: 'target.rebuild.started' }} /></StrictMode>);
+  rerender(<StrictMode><TargetWorkspace {...props} refresh={{ sequence: 3, type: 'target.rebuild.failed' }} /></StrictMode>);
+  scopeResponses[2].resolve(response({ version: 9, rules: [] }));
+  treeResponses[2].resolve(response([{ ...tree[0], host: 'fresh.test' }]));
+  statusResponses[2].resolve(response({ id: 4, scopeVersion: 9, activeScopeVersion: 9, status: 'building', processed: 1, total: 3, error: '' }));
+  statusResponses[3].resolve(response({ id: 4, scopeVersion: 9, activeScopeVersion: 9, status: 'building', processed: 2, total: 3, error: '' }));
+  statusResponses[4].resolve(response({ id: 4, scopeVersion: 9, activeScopeVersion: 9, status: 'failed', processed: 2, total: 3, error: 'latest strict failure' }));
+
+  expect(await screen.findByText('v9')).toBeInTheDocument();
+  expect(screen.getByRole('treeitem', { name: /fresh\.test/ })).toBeInTheDocument();
+  expect(await screen.findByText('latest strict failure')).toBeInTheDocument();
   expect(screen.queryByText('2 / 3')).not.toBeInTheDocument();
 });
 

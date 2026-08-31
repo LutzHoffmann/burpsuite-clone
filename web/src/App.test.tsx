@@ -377,8 +377,21 @@ test('filters History by text and scope and renders valid sibling row controls',
   await user.selectOptions(scopeFilter, 'all');
 
   expect(screen.getByRole('table', { name: 'Request history' }).tagName).toBe('TABLE');
-  expect(screen.getAllByRole('columnheader')).toHaveLength(10);
+  const headers = screen.getAllByRole('columnheader');
+  expect(headers).toHaveLength(10);
   for (const row of screen.getAllByRole('row').slice(1)) {
+    const cells = within(row).getAllByRole('cell');
+    expect(cells).toHaveLength(10);
+    expect(cells[3]).toHaveAttribute('headers', headers[3].id);
+    expect(cells[4]).toHaveAttribute('headers', headers[4].id);
+    expect(cells[5]).toHaveAttribute('headers', headers[5].id);
+    expect(cells[6]).toHaveAttribute('headers', headers[6].id);
+    expect(cells[7]).toHaveAttribute('headers', headers[7].id);
+    expect(cells[3]).toHaveTextContent(/200|ERR/);
+    expect(cells[4]).toHaveTextContent(/text\/plain|-/);
+    expect(cells[5]).toHaveTextContent(/13 B/);
+    expect(cells[6]).toHaveTextContent('125 ms');
+    expect(cells[7]).toHaveTextContent(new Date('2026-08-19T10:24:00Z').toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }));
     expect(row.querySelector('button button')).toBeNull();
     expect(within(row).getAllByRole('button')).toHaveLength(2);
   }
