@@ -45,6 +45,8 @@ func TestTargetScopeEndToEnd(t *testing.T) {
 	harness.ProxyGET(allowedHTTP)
 	harness.ProxyGET(outsideHTTP)
 	harness.ProxyGET(allowedHTTPS)
+	harness.WaitForTarget(allowedHTTP, "q")
+	harness.WaitForTarget(allowedHTTPS)
 
 	history := harness.History()
 	assertHistoryScope(t, history, "http", "/allowed", true, 1)
@@ -310,32 +312,98 @@ func (h *targetHarness) WaitForRebuild() {
 	}
 }
 
+func (h *targetHarness) WaitForTarget(rawURL string, parameterNames ...string) {
+	h.t.Helper()
+	targetURL := mustParseURL(h.t, rawURL)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	ticker := time.NewTicker(5 * time.Millisecond)
+	defer ticker.Stop()
+
+	var lastHistory []store.HistoryItem
+	var lastTree []store.TargetTreeNode
+	var lastStatus store.RebuildStatus
+	var lastParameters []store.TargetParameter
+	var lastErrors []string
+	for {
+		lastErrors = lastErrors[:0]
+		if body, err := h.apiRequestContext(ctx, http.MethodGet, "/api/history", nil); err != nil {
+			lastErrors = append(lastErrors, "History: "+err.Error())
+		} else if err := json.Unmarshal(body, &lastHistory); err != nil {
+			lastErrors = append(lastErrors, fmt.Sprintf("decode History: %v; body=%q", err, body))
+		}
+		if body, err := h.apiRequestContext(ctx, http.MethodGet, "/api/target/tree", nil); err != nil {
+			lastErrors = append(lastErrors, "Target tree: "+err.Error())
+		} else if err := json.Unmarshal(body, &lastTree); err != nil {
+			lastErrors = append(lastErrors, fmt.Sprintf("decode Target tree: %v; body=%q", err, body))
+		}
+		if body, err := h.apiRequestContext(ctx, http.MethodGet, "/api/target/rebuild", nil); err != nil {
+			lastErrors = append(lastErrors, "rebuild status: "+err.Error())
+		} else if err := json.Unmarshal(body, &lastStatus); err != nil {
+			lastErrors = append(lastErrors, fmt.Sprintf("decode rebuild status: %v; body=%q", err, body))
+		}
+
+		endpointID := targetEndpointIDForURL(lastTree, targetURL)
+		lastParameters = nil
+		if endpointID == 0 {
+			lastErrors = append(lastErrors, "endpoint not present in Target tree")
+		} else {
+			path := "/api/target/endpoints/" + strconv.FormatInt(endpointID, 10) + "/parameters"
+			if body, err := h.apiRequestContext(ctx, http.MethodGet, path, nil); err != nil {
+				lastErrors = append(lastErrors, "parameters: "+err.Error())
+			} else if err := json.Unmarshal(body, &lastParameters); err != nil {
+				lastErrors = append(lastErrors, fmt.Sprintf("decode parameters: %v; body=%q", err, body))
+			}
+		}
+		if len(lastErrors) == 0 && parameterNamesEqual(lastParameters, parameterNames) {
+			return
+		}
+
+		select {
+		case <-ticker.C:
+		case <-ctx.Done():
+			h.t.Fatalf(
+				"timed out waiting for Target projection of %s; History=%#v TargetTree=%#v RebuildStatus=%#v Parameters=%#v QueryErrors=%#v",
+				rawURL, lastHistory, lastTree, lastStatus, lastParameters, lastErrors,
+			)
+		}
+	}
+}
+
 func (h *targetHarness) EnableInterception() {
 	h.intercept.Update(intercept.ControllerState{Enabled: true, Rules: []intercept.Rule{{Enabled: true}}})
 }
 
 func (h *targetHarness) apiRequest(method, path string, body io.Reader) []byte {
 	h.t.Helper()
-	request, err := http.NewRequest(method, h.apiServer.URL+path, body)
+	responseBody, err := h.apiRequestContext(context.Background(), method, path, body)
 	if err != nil {
 		h.t.Fatal(err)
+	}
+	return responseBody
+}
+
+func (h *targetHarness) apiRequestContext(ctx context.Context, method, path string, body io.Reader) ([]byte, error) {
+	request, err := http.NewRequestWithContext(ctx, method, h.apiServer.URL+path, body)
+	if err != nil {
+		return nil, fmt.Errorf("API %s %s: %w", method, path, err)
 	}
 	if body != nil {
 		request.Header.Set("Content-Type", "application/json")
 	}
 	response, err := h.apiClient.Do(request)
 	if err != nil {
-		h.t.Fatalf("API %s %s: %v", method, path, err)
+		return nil, fmt.Errorf("API %s %s: %w", method, path, err)
 	}
 	responseBody, readErr := io.ReadAll(response.Body)
 	closeErr := response.Body.Close()
 	if readErr != nil || closeErr != nil {
-		h.t.Fatalf("read API %s %s: read=%v close=%v", method, path, readErr, closeErr)
+		return nil, fmt.Errorf("read API %s %s: read=%v close=%v", method, path, readErr, closeErr)
 	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		h.t.Fatalf("API %s %s: status=%d body=%q", method, path, response.StatusCode, responseBody)
+		return nil, fmt.Errorf("API %s %s: status=%d body=%q", method, path, response.StatusCode, responseBody)
 	}
-	return responseBody
+	return responseBody, nil
 }
 
 func (h *targetHarness) waitUntil(operation string, ready func() bool) {
@@ -404,6 +472,18 @@ func assertParameterNames(t *testing.T, parameters []store.TargetParameter, name
 	if fmt.Sprint(observed) != fmt.Sprint(names) {
 		t.Fatalf("parameter names=%#v, want=%#v; parameters=%#v", observed, names, parameters)
 	}
+}
+
+func parameterNamesEqual(parameters []store.TargetParameter, names []string) bool {
+	if len(parameters) != len(names) {
+		return false
+	}
+	for index := range parameters {
+		if parameters[index].Name != names[index] {
+			return false
+		}
+	}
+	return true
 }
 
 func targetEndpointPaths(tree []store.TargetTreeNode) []string {
