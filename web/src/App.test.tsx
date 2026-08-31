@@ -124,6 +124,13 @@ function lastScopeUpdate() {
   return scopeUpdates.at(-1);
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((nextResolve, nextReject) => { resolve = nextResolve; reject = nextReject; });
+  return { promise, resolve, reject };
+}
+
 async function renderSettledApp() {
   render(<App />);
   await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
@@ -241,7 +248,7 @@ test('sends a selected history request to repeater through the api', async () =>
 
   render(<App />);
   const rowHost = await screen.findByText('replay.test');
-  fireEvent.doubleClick(rowHost.closest('[role="row"]')!.querySelector('button')!);
+  fireEvent.doubleClick(rowHost.closest('tr')!.querySelector('button')!);
   await waitFor(() => expect(screen.getByLabelText('URL')).toHaveValue('https://replay.test/submit'));
   fireEvent.click(screen.getByRole('button', { name: 'Send' }));
   expect(await screen.findByDisplayValue('real response')).toBeInTheDocument();
@@ -288,6 +295,8 @@ test('opens Target and routes endpoint and rebuild events without reloading Hist
   render(<App />);
   fireEvent.click(screen.getByRole('button', { name: 'Target' }));
   expect(await screen.findByRole('heading', { name: 'Site Map' })).toBeInTheDocument();
+  expect(screen.getByRole('region', { name: 'Target workspace' })).toBeInTheDocument();
+  expect(screen.queryByRole('main', { name: 'Target workspace' })).not.toBeInTheDocument();
   const historyLoads = countFetches(fetchMock, '/api/history');
   const treeLoads = countFetches(fetchMock, '/api/target/tree');
   const rebuildLoads = countFetches(fetchMock, '/api/target/rebuild');
@@ -367,10 +376,45 @@ test('filters History by text and scope and renders valid sibling row controls',
   expect(screen.queryByText('In scope')).not.toBeInTheDocument();
   await user.selectOptions(scopeFilter, 'all');
 
+  expect(screen.getByRole('table', { name: 'Request history' }).tagName).toBe('TABLE');
+  expect(screen.getAllByRole('columnheader')).toHaveLength(10);
   for (const row of screen.getAllByRole('row').slice(1)) {
     expect(row.querySelector('button button')).toBeNull();
     expect(within(row).getAllByRole('button')).toHaveLength(2);
   }
+});
+
+test('disables every Add to scope control until the pending scope update finishes', async () => {
+  const scopeRead = deferred<Response>();
+  const history = [
+    { ...historyFixture(71, 'first.test', '/one'), inScope: false },
+    { ...historyFixture(72, 'second.test', '/two'), inScope: false },
+  ];
+  const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const base = strictBaseResponse(input, init, history);
+    if (base) return base;
+    const { path, method } = requestDetails(input, init);
+    if (path === '/api/scope/rules' && method === 'GET') return scopeRead.promise;
+    if (path === '/api/scope/rules' && method === 'PUT') {
+      scopeUpdates.push(JSON.parse(String(init?.body)));
+      return jsonResponse({ version: 13, rules: scopeUpdates.at(-1)?.rules ?? [] });
+    }
+    throw new Error(`Unexpected request: ${method} ${path}`);
+  });
+  vi.stubGlobal('fetch', fetchMock);
+  render(<App />);
+  const first = await screen.findByRole('button', { name: 'Add first.test to scope' });
+  const second = screen.getByRole('button', { name: 'Add second.test to scope' });
+  fireEvent.click(first);
+  await waitFor(() => expect(countFetches(fetchMock, '/api/scope/rules')).toBe(1));
+  expect(first).toBeDisabled();
+  expect(second).toBeDisabled();
+  fireEvent.click(second);
+  scopeRead.resolve(jsonResponse(scopeFixture));
+
+  await waitFor(() => expect(countFetches(fetchMock, '/api/scope/rules', 'PUT')).toBe(1));
+  expect(lastScopeUpdate()?.rules).toEqual([expect.objectContaining({ hostPattern: 'first.test' })]);
+  expect(countFetches(fetchMock, '/api/scope/rules')).toBe(1);
 });
 
 test('adds a normalized origin to scope with the latest version and effective HTTPS port', async () => {

@@ -443,6 +443,47 @@ test('ignores slow stale refresh responses and errors after a newer event', asyn
   await waitFor(() => expect(screen.queryByText('stale target failure')).not.toBeInTheDocument());
 });
 
+test('keeps scope and tree refreshes when back-to-back rebuild events supersede only status', async () => {
+  const freshScope = deferred<Response>();
+  const freshTree = deferred<Response>();
+  const fullStatus = deferred<Response>();
+  const startedStatus = deferred<Response>();
+  const failedStatus = deferred<Response>();
+  let scopeReads = 0;
+  let treeReads = 0;
+  let statusReads = 0;
+  vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+    const path = new URL(String(input), 'http://localhost').pathname;
+    if (path === '/api/scope/rules') return scopeReads++ === 0 ? Promise.resolve(response(scope)) : freshScope.promise;
+    if (path === '/api/target/tree') return treeReads++ === 0 ? Promise.resolve(response(tree)) : freshTree.promise;
+    if (path === '/api/target/rebuild') {
+      const read = statusReads++;
+      if (read === 0) return Promise.resolve(response({ id: 4, scopeVersion: 3, activeScopeVersion: 3, status: 'idle', processed: 0, total: 0, error: '' }));
+      if (read === 1) return fullStatus.promise;
+      if (read === 2) return startedStatus.promise;
+      return failedStatus.promise;
+    }
+    throw new Error(`Unexpected request: ${path}`);
+  }));
+  const props = { onOpenHistory: vi.fn(), onSendToRepeater: vi.fn() };
+  const { rerender } = render(<TargetWorkspace {...props} refresh={{ sequence: 0, type: 'initial' }} />);
+  await screen.findByRole('treeitem', { name: /example\.test/ });
+
+  rerender(<TargetWorkspace {...props} refresh={{ sequence: 1, type: 'scope.changed' }} />);
+  rerender(<TargetWorkspace {...props} refresh={{ sequence: 2, type: 'target.rebuild.started' }} />);
+  rerender(<TargetWorkspace {...props} refresh={{ sequence: 3, type: 'target.rebuild.failed' }} />);
+  freshScope.resolve(response({ version: 9, rules: [] }));
+  freshTree.resolve(response([{ ...tree[0], host: 'fresh.test' }]));
+  fullStatus.resolve(response({ id: 4, scopeVersion: 9, activeScopeVersion: 9, status: 'building', processed: 1, total: 3, error: '' }));
+  startedStatus.resolve(response({ id: 4, scopeVersion: 9, activeScopeVersion: 9, status: 'building', processed: 2, total: 3, error: '' }));
+  failedStatus.resolve(response({ id: 4, scopeVersion: 9, activeScopeVersion: 9, status: 'failed', processed: 2, total: 3, error: 'latest rebuild failure' }));
+
+  expect(await screen.findByText('v9')).toBeInTheDocument();
+  expect(screen.getByRole('treeitem', { name: /fresh\.test/ })).toBeInTheDocument();
+  expect(await screen.findByText('latest rebuild failure')).toBeInTheDocument();
+  expect(screen.queryByText('2 / 3')).not.toBeInTheDocument();
+});
+
 test('opens endpoint request history and sends it to repeater', async () => {
   const onOpenHistory = vi.fn();
   const onSendToRepeater = vi.fn();
@@ -476,7 +517,8 @@ test('renders an actionable mobile-safe empty project state with landmarks', asy
   vi.stubGlobal('fetch', targetFetchFixture({ tree: [] }));
   render(<TargetWorkspace refresh={{ sequence: 0, type: 'initial' }} onOpenHistory={vi.fn()} onSendToRepeater={vi.fn()} />);
   expect(await screen.findByText(/No in-scope endpoints/)).toBeInTheDocument();
-  expect(screen.getByRole('main', { name: 'Target workspace' })).toHaveClass('target-workspace');
+  expect(screen.queryByRole('main', { name: 'Target workspace' })).not.toBeInTheDocument();
+  expect(screen.getByRole('region', { name: 'Target workspace' })).toHaveClass('target-workspace');
   expect(screen.getByRole('region', { name: 'Scope editor' })).toHaveClass('scope-editor');
   expect(screen.getByRole('region', { name: 'Site map' })).toHaveClass('target-site-map');
   expect(screen.getByRole('region', { name: 'Endpoint details' })).toHaveClass('target-details');

@@ -40,7 +40,13 @@ export function TargetWorkspace({ refresh, onOpenHistory, onSendToRepeater }: Ta
   const [filters, setFilters] = useState(defaultFilters);
   const [loadError, setLoadError] = useState('');
   const detailGeneration = useRef(0);
+  const scopeGeneration = useRef(0);
+  const treeGeneration = useRef(0);
+  const statusGeneration = useRef(0);
+  const mounted = useRef(true);
   const [detailAttempt, setDetailAttempt] = useState(0);
+
+  useEffect(() => () => { mounted.current = false; }, []);
 
   const clearDetail = () => {
     detailGeneration.current += 1;
@@ -58,32 +64,43 @@ export function TargetWorkspace({ refresh, onOpenHistory, onSendToRepeater }: Ta
   };
 
   useEffect(() => {
-    let current = true;
-    const load = async () => {
-      try {
-        setLoadError('');
-        if (refresh.type === 'target.rebuild.started' || refresh.type === 'target.rebuild.progress' || refresh.type === 'target.rebuild.failed') {
-          const nextStatus = await getRebuildStatus();
-          if (current) setStatus(nextStatus);
-          return;
-        }
-        if (refresh.type === 'target.endpoint.updated') {
-          const nextTree = await getTargetTree();
-          if (current) replaceTree(nextTree);
-          return;
-        }
-        const [nextScope, nextTree, nextStatus] = await Promise.all([getScopeState(), getTargetTree(), getRebuildStatus()]);
-        if (current) {
-          setScope(nextScope);
-          replaceTree(nextTree);
-          setStatus(nextStatus);
-        }
-      } catch (error) {
-        if (current) setLoadError(String(error));
-      }
+    const loadScope = () => {
+      const generation = ++scopeGeneration.current;
+      setLoadError('');
+      void getScopeState().then((nextScope) => {
+        if (mounted.current && generation === scopeGeneration.current) setScope(nextScope);
+      }).catch((error) => {
+        if (mounted.current && generation === scopeGeneration.current) setLoadError(String(error));
+      });
     };
-    void load();
-    return () => { current = false; };
+    const loadTree = () => {
+      const generation = ++treeGeneration.current;
+      setLoadError('');
+      void getTargetTree().then((nextTree) => {
+        if (mounted.current && generation === treeGeneration.current) replaceTree(nextTree);
+      }).catch((error) => {
+        if (mounted.current && generation === treeGeneration.current) setLoadError(String(error));
+      });
+    };
+    const loadStatus = () => {
+      const generation = ++statusGeneration.current;
+      setLoadError('');
+      void getRebuildStatus().then((nextStatus) => {
+        if (mounted.current && generation === statusGeneration.current) setStatus(nextStatus);
+      }).catch((error) => {
+        if (mounted.current && generation === statusGeneration.current) setLoadError(String(error));
+      });
+    };
+
+    if (refresh.type === 'target.rebuild.started' || refresh.type === 'target.rebuild.progress' || refresh.type === 'target.rebuild.failed') {
+      loadStatus();
+    } else if (refresh.type === 'target.endpoint.updated') {
+      loadTree();
+    } else {
+      loadScope();
+      loadTree();
+      loadStatus();
+    }
   }, [refresh.sequence, refresh.type]);
 
   useEffect(() => {
@@ -120,7 +137,7 @@ export function TargetWorkspace({ refresh, onOpenHistory, onSendToRepeater }: Ta
     setSelectedID(id);
   };
 
-  return <main className="target-workspace" aria-label="Target workspace">
+  return <section className="target-workspace" aria-label="Target workspace">
     <ScopeEditor state={scope} onSaved={setScope} />
     <section aria-label="Site map" className="target-site-map">
       <div className="target-section-heading"><div><span className="eyebrow">Observed routes</span><h1>Site Map</h1></div>{stale && <span className="stale-badge">Stale site map</span>}</div>
@@ -149,5 +166,5 @@ export function TargetWorkspace({ refresh, onOpenHistory, onSendToRepeater }: Ta
         <div className="target-list">{requests.map((request) => <div className="target-request" key={request.exchangeId}><span>{request.status || 'ERR'} at {new Date(request.startedAt).toLocaleString()}</span><div><button onClick={() => onOpenHistory(request.exchangeId)} type="button">Open {request.exchangeId} in History</button><button onClick={() => onSendToRepeater(request.exchangeId)} type="button">Send {request.exchangeId} to Repeater</button></div></div>)}</div>
       </>}
     </section>
-  </main>;
+  </section>;
 }

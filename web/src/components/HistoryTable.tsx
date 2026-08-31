@@ -5,6 +5,7 @@ type HistoryTableProps = {
   selectedId: number | null;
   query: string;
   scopeFilter: 'all' | 'in' | 'out';
+  addingToScope: boolean;
   onSelect: (id: number) => void;
   onSendToRepeater: (id: number) => void;
   onAddOriginToScope: (item: HistoryItem) => void;
@@ -18,7 +19,7 @@ function formatTime(startedAt: string) {
   return new Date(startedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 }
 
-export function HistoryTable({ items, selectedId, query, scopeFilter, onSelect, onSendToRepeater, onAddOriginToScope }: HistoryTableProps) {
+export function HistoryTable({ items, selectedId, query, scopeFilter, addingToScope, onSelect, onSendToRepeater, onAddOriginToScope }: HistoryTableProps) {
   const normalizedQuery = query.trim().toLowerCase();
   const filteredItems = items.filter((item) => {
     const matchesQuery = !normalizedQuery || [item.method, item.host, item.path, item.query].some((value) => value.toLowerCase().includes(normalizedQuery));
@@ -27,18 +28,14 @@ export function HistoryTable({ items, selectedId, query, scopeFilter, onSelect, 
   });
 
   return (
-    <div className="request-table" role="table" aria-label="Request history">
-      <div className="table-row table-header" role="row">
-        <span>Method</span><span>Host</span><span>Path</span><span>Status</span>
-        <span>MIME</span><span>Size</span><span>Duration</span><span>Time</span><span>Scope</span><span>Action</span>
-      </div>
-      {filteredItems.map((item) => {
-        return <div
-          className={`table-row ${item.id === selectedId ? 'selected' : ''}`}
-          key={item.id}
-          role="row"
-        >
-          <button
+    <div className="request-table">
+      <table aria-label="Request history">
+        <thead><tr className="table-row table-header">
+          <th scope="col">Method</th><th scope="col">Host</th><th scope="col">Path</th><th scope="col">Status</th>
+          <th scope="col">MIME</th><th scope="col">Size</th><th scope="col">Duration</th><th scope="col">Time</th><th scope="col">Scope</th><th scope="col">Action</th>
+        </tr></thead>
+        <tbody>{filteredItems.map((item) => <tr className={`table-row ${item.id === selectedId ? 'selected' : ''}`} key={item.id}>
+          <td className="history-cells" colSpan={8}><button
             aria-label={`Select ${item.method} ${item.host}${item.path}`}
             aria-pressed={item.id === selectedId}
             className="history-row-select"
@@ -54,11 +51,11 @@ export function HistoryTable({ items, selectedId, query, scopeFilter, onSelect, 
             <span>{formatBytes(item.responseSize)}</span>
             <span>{item.durationMs} ms</span>
             <span>{formatTime(item.startedAt)}</span>
-          </button>
-          <span className={`scope-badge ${item.inScope ? 'in-scope' : 'out-of-scope'}`}>{item.inScope ? 'In scope' : 'Out of scope'}</span>
-          <button className="add-scope-button" onClick={() => onAddOriginToScope(item)} type="button">Add {item.host} to scope</button>
-        </div>;
-      })}
+          </button></td>
+          <td><span className={`scope-badge ${item.inScope ? 'in-scope' : 'out-of-scope'}`}>{item.inScope ? 'In scope' : 'Out of scope'}</span></td>
+          <td><button className="add-scope-button" disabled={addingToScope} onClick={() => onAddOriginToScope(item)} type="button">Add {item.host} to scope</button></td>
+        </tr>)}</tbody>
+      </table>
     </div>
   );
 }

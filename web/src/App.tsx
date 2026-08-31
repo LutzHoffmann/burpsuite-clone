@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Boxes, FileText, History, Map, Network, Search, Send, SlidersHorizontal } from 'lucide-react';
 import {
   ApiError,
@@ -145,6 +145,8 @@ export function App() {
   const [historyQuery, setHistoryQuery] = useState('');
   const [historyScope, setHistoryScope] = useState<'all' | 'in' | 'out'>('all');
   const [targetRefresh, setTargetRefresh] = useState<TargetRefresh>({ sequence: 0, type: 'initial' });
+  const [addingOriginToScope, setAddingOriginToScope] = useState(false);
+  const scopeMutationPending = useRef(false);
 
   useEffect(() => {
     let active = true;
@@ -289,6 +291,9 @@ export function App() {
   };
 
   const addOriginToScope = async (item: HistoryItem) => {
+    if (scopeMutationPending.current) return;
+    scopeMutationPending.current = true;
+    setAddingOriginToScope(true);
     try {
       const candidate = scopeRuleForOrigin(item);
       const current = await getScopeState();
@@ -309,6 +314,9 @@ export function App() {
         return;
       }
       setAPIErrors((errors) => ({ ...errors, scope: `Add to scope failed: ${error instanceof Error ? error.message : 'request failed'}` }));
+    } finally {
+      scopeMutationPending.current = false;
+      setAddingOriginToScope(false);
     }
   };
 
@@ -344,7 +352,7 @@ export function App() {
             <label className="search"><Search size={15} /><input onChange={(event) => setHistoryQuery(event.target.value)} placeholder="Filter requests" value={historyQuery} /></label>
             <label className="scope-filter"><span>Scope</span><select aria-label="History scope" onChange={(event) => setHistoryScope(event.target.value as 'all' | 'in' | 'out')} value={historyScope}><option value="all">All</option><option value="in">In</option><option value="out">Out</option></select></label>
           </div>
-          <HistoryTable items={items} selectedId={selectedId} query={historyQuery} scopeFilter={historyScope} onSelect={setSelectedId} onSendToRepeater={(id) => void sendHistoryToRepeater(id)} onAddOriginToScope={(item) => void addOriginToScope(item)} />
+          <HistoryTable addingToScope={addingOriginToScope} items={items} selectedId={selectedId} query={historyQuery} scopeFilter={historyScope} onSelect={setSelectedId} onSendToRepeater={(id) => void sendHistoryToRepeater(id)} onAddOriginToScope={(item) => void addOriginToScope(item)} />
         </section>
 
         <section className="inspector-panel" aria-label="Exchange inspector">
