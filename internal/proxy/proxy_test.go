@@ -30,11 +30,12 @@ import (
 	"github.com/lutzifer/burpsuite-clone/internal/scope"
 	"github.com/lutzifer/burpsuite-clone/internal/store"
 	"github.com/lutzifer/burpsuite-clone/internal/target"
+	"golang.org/x/net/idna"
 )
 
 func TestTargetScopeEndToEnd(t *testing.T) {
 	harness := newTargetHarness(t)
-	harness.ReplaceScope([]scope.Rule{{
+	initialScope := harness.ReplaceScope([]scope.Rule{{
 		Enabled: true, Action: scope.ActionInclude, HostPattern: "localhost", PathPrefix: "/allowed",
 	}})
 	harness.WaitForRebuild()
@@ -46,17 +47,18 @@ func TestTargetScopeEndToEnd(t *testing.T) {
 	harness.ProxyGET(outsideHTTP)
 	harness.AssertTargetObservationCompleted(outsideHTTP)
 	harness.ProxyGET(allowedHTTPS)
+	harness.AssertHTTPSUpstreamSNI("localhost")
 	harness.WaitForTarget(allowedHTTP, "q")
 	harness.WaitForTarget(allowedHTTPS)
 
 	history := harness.History()
-	assertHistoryScope(t, history, "http", "/allowed", true, 1)
-	assertHistoryScope(t, history, "http", "/outside", false, 1)
-	assertHistoryScope(t, history, "https", "/allowed", true, 1)
+	assertHistoryScope(t, history, "http", "/allowed", true, initialScope.Version, &initialScope.Rules[0].ID)
+	assertHistoryScope(t, history, "http", "/outside", false, initialScope.Version, nil)
+	assertHistoryScope(t, history, "https", "/allowed", true, initialScope.Version, &initialScope.Rules[0].ID)
 	tree := harness.TargetTree()
-	assertTreeContains(t, tree, "http", "/allowed")
-	assertTreeContains(t, tree, "https", "/allowed")
-	assertTreeOmits(t, tree, "/outside")
+	assertTreeContainsURL(t, tree, allowedHTTP)
+	assertTreeContainsURL(t, tree, allowedHTTPS)
+	assertTreeOmitsURL(t, tree, outsideHTTP)
 	assertParameterNames(t, harness.ParametersFor(allowedHTTP), "q")
 
 	harness.EnableInterception()
@@ -74,20 +76,61 @@ func TestTargetScopeEndToEnd(t *testing.T) {
 	}})
 	harness.WaitForRebuild()
 	tree = harness.TargetTree()
-	assertTreeContains(t, tree, "http", "/allowed")
-	assertTreeContains(t, tree, "https", "/allowed")
-	assertTreeContains(t, tree, "http", "/outside")
+	assertTreeContainsURL(t, tree, allowedHTTP)
+	assertTreeContainsURL(t, tree, allowedHTTPS)
+	assertTreeContainsURL(t, tree, outsideHTTP)
+	assertParameterNames(t, harness.ParametersFor(outsideHTTP), "secret")
 
 	harness.ReplaceScope([]scope.Rule{{
 		Enabled: true, Action: scope.ActionInclude, HostPattern: "localhost", PathPrefix: "/outside",
 	}})
 	harness.WaitForRebuild()
 	tree = harness.TargetTree()
-	assertTreeContains(t, tree, "http", "/outside")
-	assertTreeOmits(t, tree, "/allowed")
-	assertHistoryScope(t, harness.History(), "http", "/allowed", true, 1)
-	assertHistoryScope(t, harness.History(), "http", "/outside", false, 1)
-	assertHistoryScope(t, harness.History(), "https", "/allowed", true, 1)
+	assertTreeContainsURL(t, tree, outsideHTTP)
+	assertTreeOmitsURL(t, tree, allowedHTTP)
+	assertHistoryScope(t, harness.History(), "http", "/allowed", true, initialScope.Version, &initialScope.Rules[0].ID)
+	assertHistoryScope(t, harness.History(), "http", "/outside", false, initialScope.Version, nil)
+	assertHistoryScope(t, harness.History(), "https", "/allowed", true, initialScope.Version, &initialScope.Rules[0].ID)
+}
+
+func TestWaitForRebuildContextDeadlineBoundsStalledAPI(t *testing.T) {
+	apiServer := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, request *http.Request) {
+		<-request.Context().Done()
+	}))
+	defer apiServer.Close()
+	harness := &targetHarness{t: t, apiServer: apiServer, apiClient: apiServer.Client()}
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	err := harness.waitForRebuildContext(ctx)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("waitForRebuildContext error = %v", err)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second/2 {
+		t.Fatalf("stalled rebuild API exceeded context deadline: %s", elapsed)
+	}
+}
+
+func TestTargetEndpointIdentityRejectsWrongHostPortAndOutOfScopeLeaves(t *testing.T) {
+	tree := []store.TargetTreeNode{{
+		Scheme: "https", Host: "LOCALHOST", Port: 9443,
+		Children: []store.TargetTreeNode{
+			{Path: "api", Children: []store.TargetTreeNode{{ID: 7, Method: http.MethodGet, InScope: true}}},
+			{Path: "outside", Children: []store.TargetTreeNode{{ID: 8, Method: http.MethodGet, InScope: false}}},
+		},
+	}}
+	if got := targetEndpointIDForURL(tree, mustParseURL(t, "https://localhost:9443/api")); got != 7 {
+		t.Fatalf("correct endpoint ID = %d, want 7", got)
+	}
+	for _, rawURL := range []string{
+		"https://wrong.test:9443/api",
+		"https://localhost:9444/api",
+		"https://localhost:9443/outside",
+	} {
+		if got := targetEndpointIDForURL(tree, mustParseURL(t, rawURL)); got != 0 {
+			t.Fatalf("endpoint ID for %s = %d, want 0", rawURL, got)
+		}
+	}
 }
 
 func TestTargetObservationBarrierWaitsForOutsideCompletion(t *testing.T) {
@@ -164,6 +207,7 @@ type targetHarness struct {
 	proxyDone     chan error
 	client        *http.Client
 	scopeVersion  int64
+	upstreamSNI   <-chan string
 }
 
 func newTargetHarness(t *testing.T) *targetHarness {
@@ -183,31 +227,43 @@ func newTargetHarness(t *testing.T) *targetHarness {
 		t.Fatal(err)
 	}
 
-	handler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "text/plain")
-		_, _ = w.Write([]byte("target response"))
-	})
-	httpTarget := httptest.NewServer(handler)
-	httpsTarget := httptest.NewTLSServer(handler)
 	hub := events.NewHub()
 	manager := scope.NewManager(compiled)
 	targetService := target.NewService(repository, manager, hub, target.Limits{
 		MaxJSONDepth: 16, MaxFields: 1000, MaxMultipartFields: 100,
 	})
 	if err := targetService.Recover(context.Background()); err != nil {
-		httpTarget.Close()
-		httpsTarget.Close()
 		_ = repository.Close()
 		t.Fatal(err)
 	}
 	authority, err := certs.LoadOrCreateAuthority(t.TempDir())
 	if err != nil {
 		targetService.Close()
-		httpTarget.Close()
-		httpsTarget.Close()
 		_ = repository.Close()
 		t.Fatal(err)
 	}
+	upstreamSNI := make(chan string, 1)
+	handler := http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		if request.TLS != nil {
+			select {
+			case upstreamSNI <- request.TLS.ServerName:
+			default:
+			}
+		}
+		w.Header().Set("Content-Type", "text/plain")
+		_, _ = w.Write([]byte("target response"))
+	})
+	httpTarget := httptest.NewServer(handler)
+	certificate, err := authority.CertificateForHost("localhost")
+	if err != nil {
+		httpTarget.Close()
+		targetService.Close()
+		_ = repository.Close()
+		t.Fatal(err)
+	}
+	httpsTarget := httptest.NewUnstartedServer(handler)
+	httpsTarget.TLS = &tls.Config{Certificates: []tls.Certificate{certificate}}
+	httpsTarget.StartTLS()
 	controller := intercept.NewController(
 		intercept.NewQueue(5*time.Second), false, []intercept.Rule{{Enabled: true}},
 	)
@@ -218,9 +274,6 @@ func newTargetHarness(t *testing.T) *targetHarness {
 	}).Handler())
 	listener := listenForTest(t)
 	upstream := httpsTarget.Client().Transport.(*http.Transport).Clone()
-	upstreamTLS := upstream.TLSClientConfig.Clone()
-	upstreamTLS.ServerName = "example.com"
-	upstream.TLSClientConfig = upstreamTLS
 	proxyServer := NewServer(Config{
 		Store: repository, BodyLimitBytes: 4096, Transport: upstream, Authority: authority,
 		Events: hub, Intercept: controller, Scope: manager, Target: observer,
@@ -232,7 +285,7 @@ func newTargetHarness(t *testing.T) *targetHarness {
 		t: t, repository: repository, target: targetService, observer: observer, intercept: controller,
 		httpTarget: httpTarget, httpsTarget: httpsTarget, apiServer: apiServer,
 		apiClient: apiServer.Client(), proxyListener: listener, proxyDone: done,
-		client: proxyClient(listener.Addr().String(), authority), scopeVersion: state.Version,
+		client: proxyClient(listener.Addr().String(), authority), scopeVersion: state.Version, upstreamSNI: upstreamSNI,
 	}
 	t.Cleanup(func() {
 		harness.ReleaseTargetObservationCompletion()
@@ -255,7 +308,7 @@ func newTargetHarness(t *testing.T) *targetHarness {
 	return harness
 }
 
-func (h *targetHarness) ReplaceScope(rules []scope.Rule) {
+func (h *targetHarness) ReplaceScope(rules []scope.Rule) scope.State {
 	h.t.Helper()
 	payload, err := json.Marshal(struct {
 		Version int64        `json:"version"`
@@ -270,6 +323,7 @@ func (h *targetHarness) ReplaceScope(rules []scope.Rule) {
 		h.t.Fatalf("decode scope state: %v; body = %q", err, response)
 	}
 	h.scopeVersion = state.Version
+	return state
 }
 
 func (h *targetHarness) ProxyGET(rawURL string) {
@@ -323,6 +377,18 @@ func (h *targetHarness) HTTPSURL(host, path string) string {
 	parsed.Host = net.JoinHostPort(host, parsed.Port())
 	parsed.Path = path
 	return parsed.String()
+}
+
+func (h *targetHarness) AssertHTTPSUpstreamSNI(want string) {
+	h.t.Helper()
+	select {
+	case got := <-h.upstreamSNI:
+		if got != want {
+			h.t.Fatalf("HTTPS upstream SNI = %q, want %q", got, want)
+		}
+	case <-time.After(time.Second):
+		h.t.Fatalf("HTTPS upstream did not receive SNI %q", want)
+	}
 }
 
 func (h *targetHarness) History() []store.HistoryItem {
@@ -389,25 +455,74 @@ func (h *targetHarness) ParametersFor(rawURL string) []store.TargetParameter {
 
 func (h *targetHarness) WaitForRebuild() {
 	h.t.Helper()
-	var last store.RebuildStatus
-	timer := time.NewTimer(3 * time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if err := h.waitForRebuildContext(ctx); err != nil {
+		h.t.Fatal(err)
+	}
+}
+
+func (h *targetHarness) waitForRebuildContext(ctx context.Context) error {
 	ticker := time.NewTicker(5 * time.Millisecond)
-	defer timer.Stop()
 	defer ticker.Stop()
+	var lastHistory []store.HistoryItem
+	var lastTree []store.TargetTreeNode
+	var lastStatus store.RebuildStatus
+	var lastParameters map[int64][]store.TargetParameter
+	var lastErrors []string
 	for {
-		body := h.apiRequest(http.MethodGet, "/api/target/rebuild", nil)
-		if err := json.Unmarshal(body, &last); err != nil {
-			h.t.Fatalf("decode rebuild status: %v; body = %q", err, body)
+		lastErrors = lastErrors[:0]
+		if history, err := h.historyContext(ctx); err != nil {
+			lastErrors = append(lastErrors, "History: "+err.Error())
+		} else {
+			lastHistory = history
 		}
-		if last.Status == "active" && last.ScopeVersion == h.scopeVersion && last.ActiveScopeVersion == h.scopeVersion {
-			return
+		if body, err := h.apiRequestContext(ctx, http.MethodGet, "/api/target/tree", nil); err != nil {
+			lastErrors = append(lastErrors, "Target tree: "+err.Error())
+		} else if err := json.Unmarshal(body, &lastTree); err != nil {
+			lastErrors = append(lastErrors, fmt.Sprintf("decode Target tree: %v; body=%q", err, body))
+		} else if parameters, errors := h.targetParametersContext(ctx, lastTree); len(errors) != 0 {
+			lastErrors = append(lastErrors, errors...)
+		} else {
+			lastParameters = parameters
+		}
+		if body, err := h.apiRequestContext(ctx, http.MethodGet, "/api/target/rebuild", nil); err != nil {
+			lastErrors = append(lastErrors, "rebuild status: "+err.Error())
+		} else if err := json.Unmarshal(body, &lastStatus); err != nil {
+			lastErrors = append(lastErrors, fmt.Sprintf("decode rebuild status: %v; body=%q", err, body))
+		}
+		if len(lastErrors) == 0 && lastStatus.Status == "active" && lastStatus.ScopeVersion == h.scopeVersion && lastStatus.ActiveScopeVersion == h.scopeVersion {
+			return nil
 		}
 		select {
 		case <-ticker.C:
-		case <-timer.C:
-			h.t.Fatalf("timed out waiting for Target rebuild; status=%#v History=%#v TargetTree=%#v", last, h.History(), h.TargetTree())
+		case <-ctx.Done():
+			return fmt.Errorf(
+				"timed out waiting for Target rebuild: %w; History=%#v TargetTree=%#v RebuildStatus=%#v Parameters=%#v QueryErrors=%#v",
+				ctx.Err(), lastHistory, lastTree, lastStatus, lastParameters, lastErrors,
+			)
 		}
 	}
+}
+
+func (h *targetHarness) targetParametersContext(ctx context.Context, tree []store.TargetTreeNode) (map[int64][]store.TargetParameter, []string) {
+	parameters := make(map[int64][]store.TargetParameter)
+	var errors []string
+	for _, endpoint := range targetEndpoints(tree) {
+		path := "/api/target/endpoints/" + strconv.FormatInt(endpoint.ID, 10) + "/parameters"
+		body, err := h.apiRequestContext(ctx, http.MethodGet, path, nil)
+		if err != nil {
+			errors = append(errors, "parameters for endpoint "+strconv.FormatInt(endpoint.ID, 10)+": "+err.Error())
+			continue
+		}
+		var values []store.TargetParameter
+		if err := json.Unmarshal(body, &values); err != nil {
+			errors = append(errors, fmt.Sprintf("decode parameters for endpoint %d: %v; body=%q", endpoint.ID, err, body))
+			continue
+		}
+		parameters[endpoint.ID] = values
+	}
+	return parameters, errors
 }
 
 func (h *targetHarness) WaitForTarget(rawURL string, parameterNames ...string) {
@@ -602,25 +717,7 @@ func (h *targetHarness) apiRequestContext(ctx context.Context, method, path stri
 	return responseBody, nil
 }
 
-func (h *targetHarness) waitUntil(operation string, ready func() bool) {
-	h.t.Helper()
-	timer := time.NewTimer(3 * time.Second)
-	ticker := time.NewTicker(5 * time.Millisecond)
-	defer timer.Stop()
-	defer ticker.Stop()
-	for {
-		if ready() {
-			return
-		}
-		select {
-		case <-ticker.C:
-		case <-timer.C:
-			h.t.Fatalf("timed out waiting for %s; History=%#v TargetTree=%#v", operation, h.History(), h.TargetTree())
-		}
-	}
-}
-
-func assertHistoryScope(t *testing.T, history []store.HistoryItem, scheme, path string, inScope bool, version int64) {
+func assertHistoryScope(t *testing.T, history []store.HistoryItem, scheme, path string, inScope bool, version int64, ruleID *int64) {
 	t.Helper()
 	found := false
 	for _, item := range history {
@@ -628,7 +725,7 @@ func assertHistoryScope(t *testing.T, history []store.HistoryItem, scheme, path 
 			continue
 		}
 		found = true
-		if item.InScope != inScope || item.ScopeVersion != version || (inScope && item.ScopeRuleID == nil) || (!inScope && item.ScopeRuleID != nil) {
+		if item.InScope != inScope || item.ScopeVersion != version || !equalInt64Pointers(item.ScopeRuleID, ruleID) {
 			t.Fatalf("History scope for %s %s is incorrect: item=%#v History=%#v", scheme, path, item, history)
 		}
 	}
@@ -637,24 +734,33 @@ func assertHistoryScope(t *testing.T, history []store.HistoryItem, scheme, path 
 	}
 }
 
-func assertTreeContains(t *testing.T, tree []store.TargetTreeNode, scheme, path string) {
+func equalInt64Pointers(left, right *int64) bool {
+	return left == nil && right == nil || left != nil && right != nil && *left == *right
+}
+
+func assertTreeContainsURL(t *testing.T, tree []store.TargetTreeNode, rawURL string) {
 	t.Helper()
-	observed := targetEndpointPaths(tree)
-	wanted := "GET " + scheme + " " + path
-	for _, endpoint := range observed {
-		if endpoint == wanted {
+	wanted, err := targetEndpointIdentityForURL(mustParseURL(t, rawURL))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, endpoint := range targetEndpoints(tree) {
+		if endpoint.targetEndpointIdentity == wanted {
 			return
 		}
 	}
-	t.Fatalf("Target tree does not contain %q; endpoints=%#v tree=%#v", wanted, observed, tree)
+	t.Fatalf("Target tree does not contain %s; endpoints=%#v tree=%#v", wanted, targetEndpoints(tree), tree)
 }
 
-func assertTreeOmits(t *testing.T, tree []store.TargetTreeNode, path string) {
+func assertTreeOmitsURL(t *testing.T, tree []store.TargetTreeNode, rawURL string) {
 	t.Helper()
-	observed := targetEndpointPaths(tree)
-	for _, endpoint := range observed {
-		if strings.HasSuffix(endpoint, " "+path) {
-			t.Fatalf("Target tree contains omitted path %q; endpoints=%#v tree=%#v", path, observed, tree)
+	wanted, err := targetEndpointIdentityForURL(mustParseURL(t, rawURL))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, endpoint := range targetEndpoints(tree) {
+		if sameTargetEndpointURL(endpoint.targetEndpointIdentity, wanted) {
+			t.Fatalf("Target tree contains omitted endpoint %s; endpoints=%#v tree=%#v", wanted, targetEndpoints(tree), tree)
 		}
 	}
 }
@@ -682,55 +788,124 @@ func parameterNamesEqual(parameters []store.TargetParameter, names []string) boo
 	return true
 }
 
-func targetEndpointPaths(tree []store.TargetTreeNode) []string {
-	var endpoints []string
-	var visit func([]store.TargetTreeNode, string, string)
-	visit = func(nodes []store.TargetTreeNode, scheme, path string) {
-		for _, node := range nodes {
-			nodeScheme := scheme
-			if node.Scheme != "" {
-				nodeScheme = node.Scheme
-			}
-			nodePath := path
-			if node.Path != "" {
-				nodePath += "/" + node.Path
-			}
-			if node.Method != "" {
-				endpoints = append(endpoints, node.Method+" "+nodeScheme+" "+nodePath)
-			}
-			visit(node.Children, nodeScheme, nodePath)
-		}
-	}
-	visit(tree, "", "")
-	return endpoints
+type targetEndpointIdentity struct {
+	Scheme, Host, Path, Method string
+	Port                       int
+	InScope                    bool
 }
 
-func targetEndpointIDForURL(tree []store.TargetTreeNode, targetURL *url.URL) int64 {
-	port, _ := strconv.Atoi(targetURL.Port())
-	var visit func([]store.TargetTreeNode, string, string, int) int64
-	visit = func(nodes []store.TargetTreeNode, scheme, path string, inheritedPort int) int64 {
+type targetEndpoint struct {
+	ID int64
+	targetEndpointIdentity
+}
+
+func (identity targetEndpointIdentity) String() string {
+	return fmt.Sprintf("%s://%s:%d%s %s inScope=%t", identity.Scheme, identity.Host, identity.Port, identity.Path, identity.Method, identity.InScope)
+}
+
+func targetEndpointIdentityForURL(targetURL *url.URL) (targetEndpointIdentity, error) {
+	scheme := strings.ToLower(targetURL.Scheme)
+	if scheme != "http" && scheme != "https" {
+		return targetEndpointIdentity{}, fmt.Errorf("unsupported endpoint scheme %q", targetURL.Scheme)
+	}
+	host, err := normalizeTargetHostname(targetURL.Hostname())
+	if err != nil {
+		return targetEndpointIdentity{}, err
+	}
+	port, err := effectiveURLPort(targetURL, scheme)
+	if err != nil {
+		return targetEndpointIdentity{}, err
+	}
+	path := targetURL.Path
+	if path == "" {
+		path = "/"
+	}
+	return targetEndpointIdentity{Scheme: scheme, Host: host, Port: port, Path: path, Method: http.MethodGet, InScope: true}, nil
+}
+
+func normalizeTargetHostname(host string) (string, error) {
+	host = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(host)), ".")
+	if host == "" {
+		return "", errors.New("endpoint host is empty")
+	}
+	if net.ParseIP(host) != nil {
+		return host, nil
+	}
+	normalized, err := idna.Lookup.ToASCII(host)
+	if err != nil {
+		return "", fmt.Errorf("normalize endpoint host %q: %w", host, err)
+	}
+	return strings.ToLower(normalized), nil
+}
+
+func effectiveURLPort(targetURL *url.URL, scheme string) (int, error) {
+	if targetURL.Port() == "" {
+		if scheme == "http" {
+			return 80, nil
+		}
+		return 443, nil
+	}
+	port, err := strconv.Atoi(targetURL.Port())
+	if err != nil || port < 1 || port > 65535 {
+		return 0, fmt.Errorf("invalid endpoint port %q", targetURL.Port())
+	}
+	return port, nil
+}
+
+func targetEndpoints(tree []store.TargetTreeNode) []targetEndpoint {
+	var endpoints []targetEndpoint
+	var visit func([]store.TargetTreeNode, string, string, int, string)
+	visit = func(nodes []store.TargetTreeNode, scheme, host string, port int, path string) {
 		for _, node := range nodes {
-			nodeScheme, nodePort := scheme, inheritedPort
+			nodeScheme, nodeHost, nodePort := scheme, host, port
 			if node.Scheme != "" {
-				nodeScheme = node.Scheme
+				nodeScheme = strings.ToLower(node.Scheme)
+			}
+			if node.Host != "" {
+				normalizedHost, err := normalizeTargetHostname(node.Host)
+				if err == nil {
+					nodeHost = normalizedHost
+				}
 			}
 			if node.Port != 0 {
 				nodePort = node.Port
+			} else if nodePort == 0 && nodeScheme != "" {
+				nodePort, _ = effectiveURLPort(&url.URL{Scheme: nodeScheme}, nodeScheme)
 			}
 			nodePath := path
 			if node.Path != "" {
 				nodePath += "/" + node.Path
 			}
-			if node.ID != 0 && node.Method == http.MethodGet && nodeScheme == targetURL.Scheme && nodePort == port && nodePath == targetURL.Path {
-				return node.ID
+			if node.ID != 0 && node.Method != "" {
+				endpoints = append(endpoints, targetEndpoint{
+					ID: node.ID,
+					targetEndpointIdentity: targetEndpointIdentity{
+						Scheme: nodeScheme, Host: nodeHost, Port: nodePort, Path: nodePath, Method: node.Method, InScope: node.InScope,
+					},
+				})
 			}
-			if id := visit(node.Children, nodeScheme, nodePath, nodePort); id != 0 {
-				return id
-			}
+			visit(node.Children, nodeScheme, nodeHost, nodePort, nodePath)
 		}
+	}
+	visit(tree, "", "", 0, "")
+	return endpoints
+}
+
+func sameTargetEndpointURL(left, right targetEndpointIdentity) bool {
+	return left.Scheme == right.Scheme && left.Host == right.Host && left.Port == right.Port && left.Path == right.Path && left.Method == right.Method
+}
+
+func targetEndpointIDForURL(tree []store.TargetTreeNode, targetURL *url.URL) int64 {
+	wanted, err := targetEndpointIdentityForURL(targetURL)
+	if err != nil {
 		return 0
 	}
-	return visit(tree, "", "", 0)
+	for _, endpoint := range targetEndpoints(tree) {
+		if endpoint.targetEndpointIdentity == wanted {
+			return endpoint.ID
+		}
+	}
+	return 0
 }
 
 func TestProxyForwardsAndStoresOutOfScopeWithoutIntercepting(t *testing.T) {
