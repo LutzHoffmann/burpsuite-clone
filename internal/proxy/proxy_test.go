@@ -44,6 +44,7 @@ func TestTargetScopeEndToEnd(t *testing.T) {
 	allowedHTTPS := harness.HTTPSURL("localhost", "/allowed")
 	harness.ProxyGET(allowedHTTP)
 	harness.ProxyGET(outsideHTTP)
+	harness.AssertTargetObservationCompleted(outsideHTTP)
 	harness.ProxyGET(allowedHTTPS)
 	harness.WaitForTarget(allowedHTTP, "q")
 	harness.WaitForTarget(allowedHTTPS)
@@ -89,10 +90,71 @@ func TestTargetScopeEndToEnd(t *testing.T) {
 	assertHistoryScope(t, harness.History(), "https", "/allowed", true, 1)
 }
 
+func TestTargetObservationBarrierWaitsForOutsideCompletion(t *testing.T) {
+	barrier := newTargetObservationBarrier(targetObserverFunc(func(context.Context, *store.Exchange) error {
+		return nil
+	}))
+	t.Cleanup(barrier.ReleaseCompletionBlock)
+	if err := barrier.BlockNextCompletion(); err != nil {
+		t.Fatal(err)
+	}
+
+	exchange := &store.Exchange{ID: 73, Path: "/outside", InScope: false}
+	observed := make(chan error, 1)
+	go func() { observed <- barrier.Observe(context.Background(), exchange) }()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := barrier.WaitForCompletionBlock(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	waited := make(chan struct {
+		result targetObservationResult
+		err    error
+	}, 1)
+	go func() {
+		result, err := barrier.Wait(ctx, exchange.ID)
+		waited <- struct {
+			result targetObservationResult
+			err    error
+		}{result, err}
+	}()
+	if err := barrier.WaitForWaiter(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if status, observationErr := barrier.Status(exchange.ID); status != "waiting" || observationErr != "" {
+		t.Fatalf("outside exchange observation status before release = %q, %q", status, observationErr)
+	}
+	select {
+	case result := <-waited:
+		t.Fatalf("outside observation wait completed before observer completion: %#v", result)
+	default:
+	}
+
+	barrier.ReleaseCompletionBlock()
+	select {
+	case err := <-observed:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
+	select {
+	case result := <-waited:
+		if result.err != nil || result.result.Error != "" {
+			t.Fatalf("outside observation result = %#v", result)
+		}
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
+}
+
 type targetHarness struct {
 	t             *testing.T
 	repository    *store.SQLiteStore
 	target        *target.Service
+	observer      *targetObservationBarrier
 	intercept     *intercept.Controller
 	httpTarget    *httptest.Server
 	httpsTarget   *httptest.Server
@@ -149,6 +211,7 @@ func newTargetHarness(t *testing.T) *targetHarness {
 	controller := intercept.NewController(
 		intercept.NewQueue(5*time.Second), false, []intercept.Rule{{Enabled: true}},
 	)
+	observer := newTargetObservationBarrier(targetService)
 	apiServer := httptest.NewServer(api.NewServer(api.Config{
 		Store: repository, Authority: authority, Events: hub, Intercept: controller, Target: targetService,
 		APIAddr: "127.0.0.1:9080", ProxyAddr: "127.0.0.1:8080", MaxBodyBytes: 4096,
@@ -160,18 +223,19 @@ func newTargetHarness(t *testing.T) *targetHarness {
 	upstream.TLSClientConfig = upstreamTLS
 	proxyServer := NewServer(Config{
 		Store: repository, BodyLimitBytes: 4096, Transport: upstream, Authority: authority,
-		Events: hub, Intercept: controller, Scope: manager, Target: targetService,
+		Events: hub, Intercept: controller, Scope: manager, Target: observer,
 	})
 	done := make(chan error, 1)
 	go func() { done <- proxyServer.Serve(listener) }()
 
 	harness := &targetHarness{
-		t: t, repository: repository, target: targetService, intercept: controller,
+		t: t, repository: repository, target: targetService, observer: observer, intercept: controller,
 		httpTarget: httpTarget, httpsTarget: httpsTarget, apiServer: apiServer,
 		apiClient: apiServer.Client(), proxyListener: listener, proxyDone: done,
 		client: proxyClient(listener.Addr().String(), authority), scopeVersion: state.Version,
 	}
 	t.Cleanup(func() {
+		harness.ReleaseTargetObservationCompletion()
 		harness.client.CloseIdleConnections()
 		harness.apiClient.CloseIdleConnections()
 		harness.apiServer.Close()
@@ -210,20 +274,43 @@ func (h *targetHarness) ReplaceScope(rules []scope.Rule) {
 
 func (h *targetHarness) ProxyGET(rawURL string) {
 	h.t.Helper()
-	before := len(h.History())
+	if err := h.proxyGET(rawURL); err != nil {
+		h.t.Fatal(err)
+	}
+}
+
+func (h *targetHarness) proxyGET(rawURL string) error {
+	before, err := h.historyContext(context.Background())
+	if err != nil {
+		return err
+	}
 	response, err := h.client.Get(rawURL)
 	if err != nil {
-		h.t.Fatalf("proxy GET %s: %v", rawURL, err)
+		return fmt.Errorf("proxy GET %s: %w", rawURL, err)
+	}
+	defer response.Body.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	exchangeID, err := h.waitForNewHistoryExchange(ctx, before)
+	if err != nil {
+		return fmt.Errorf("wait for persisted exchange after proxy GET %s: %w; %s", rawURL, err, h.targetObservationDiagnostics(rawURL, 0))
+	}
+	observation, err := h.observer.Wait(ctx, exchangeID)
+	if err != nil {
+		return fmt.Errorf("timed out waiting for Target observation of exchange %d after proxy GET %s: %w; %s", exchangeID, rawURL, err, h.targetObservationDiagnostics(rawURL, exchangeID))
+	}
+	if observation.Error != "" {
+		return fmt.Errorf("Target observation of exchange %d after proxy GET %s completed with error: %s; %s", exchangeID, rawURL, observation.Error, h.targetObservationDiagnostics(rawURL, exchangeID))
 	}
 	body, readErr := io.ReadAll(response.Body)
 	closeErr := response.Body.Close()
 	if readErr != nil || closeErr != nil {
-		h.t.Fatalf("read proxy response for %s: read=%v close=%v", rawURL, readErr, closeErr)
+		return fmt.Errorf("read proxy response for %s: read=%v close=%v", rawURL, readErr, closeErr)
 	}
 	if response.StatusCode != http.StatusOK || string(body) != "target response" {
-		h.t.Fatalf("proxy GET %s: status=%d body=%q", rawURL, response.StatusCode, body)
+		return fmt.Errorf("proxy GET %s: status=%d body=%q", rawURL, response.StatusCode, body)
 	}
-	h.waitUntil("history persistence", func() bool { return len(h.History()) == before+1 })
+	return nil
 }
 
 func (h *targetHarness) HTTPURL(path string) string {
@@ -240,12 +327,23 @@ func (h *targetHarness) HTTPSURL(host, path string) string {
 
 func (h *targetHarness) History() []store.HistoryItem {
 	h.t.Helper()
-	var history []store.HistoryItem
-	body := h.apiRequest(http.MethodGet, "/api/history", nil)
-	if err := json.Unmarshal(body, &history); err != nil {
-		h.t.Fatalf("decode History: %v; body = %q", err, body)
+	history, err := h.historyContext(context.Background())
+	if err != nil {
+		h.t.Fatal(err)
 	}
 	return history
+}
+
+func (h *targetHarness) historyContext(ctx context.Context) ([]store.HistoryItem, error) {
+	var history []store.HistoryItem
+	body, err := h.apiRequestContext(ctx, http.MethodGet, "/api/history", nil)
+	if err != nil {
+		return nil, err
+	}
+	if err := json.Unmarshal(body, &history); err != nil {
+		return nil, fmt.Errorf("decode History: %v; body = %q", err, body)
+	}
+	return history, nil
 }
 
 func (h *targetHarness) TargetTree() []store.TargetTreeNode {
@@ -368,6 +466,104 @@ func (h *targetHarness) WaitForTarget(rawURL string, parameterNames ...string) {
 			)
 		}
 	}
+}
+
+func (h *targetHarness) AssertTargetObservationCompleted(rawURL string) {
+	h.t.Helper()
+	parsed := mustParseURL(h.t, rawURL)
+	var matches []store.HistoryItem
+	for _, item := range h.History() {
+		if item.Method == http.MethodGet && item.Scheme == parsed.Scheme && item.Host == parsed.Host && item.Path == parsed.Path && item.Query == parsed.RawQuery {
+			matches = append(matches, item)
+		}
+	}
+	if len(matches) != 1 {
+		h.t.Fatalf("History matches for Target observation of %s = %#v; History=%#v", rawURL, matches, h.History())
+	}
+	if status, observationErr := h.observer.Status(matches[0].ID); status != "completed" || observationErr != "" {
+		h.t.Fatalf("Target observation did not complete for out-of-scope exchange %d; %s", matches[0].ID, h.targetObservationDiagnostics(rawURL, matches[0].ID))
+	}
+}
+
+func (h *targetHarness) ReleaseTargetObservationCompletion() {
+	h.observer.ReleaseCompletionBlock()
+}
+
+func (h *targetHarness) waitForNewHistoryExchange(ctx context.Context, before []store.HistoryItem) (int64, error) {
+	known := make(map[int64]struct{}, len(before))
+	for _, item := range before {
+		known[item.ID] = struct{}{}
+	}
+	ticker := time.NewTicker(5 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		history, err := h.historyContext(ctx)
+		if err != nil {
+			return 0, err
+		}
+		var added []store.HistoryItem
+		for _, item := range history {
+			if _, exists := known[item.ID]; !exists {
+				added = append(added, item)
+			}
+		}
+		if len(added) == 1 && added[0].ID != 0 {
+			return added[0].ID, nil
+		}
+		if len(added) > 1 {
+			return 0, fmt.Errorf("history added %d exchanges, want exactly one: %#v", len(added), added)
+		}
+		select {
+		case <-ticker.C:
+		case <-ctx.Done():
+			return 0, ctx.Err()
+		}
+	}
+}
+
+func (h *targetHarness) targetObservationDiagnostics(rawURL string, exchangeID int64) string {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	status, observationErr := h.observer.Status(exchangeID)
+	var history []store.HistoryItem
+	var tree []store.TargetTreeNode
+	var rebuild store.RebuildStatus
+	var parameters []store.TargetParameter
+	var queryErrors []string
+	if result, err := h.historyContext(ctx); err != nil {
+		queryErrors = append(queryErrors, "History: "+err.Error())
+	} else {
+		history = result
+	}
+	if body, err := h.apiRequestContext(ctx, http.MethodGet, "/api/target/tree", nil); err != nil {
+		queryErrors = append(queryErrors, "Target tree: "+err.Error())
+	} else if err := json.Unmarshal(body, &tree); err != nil {
+		queryErrors = append(queryErrors, fmt.Sprintf("decode Target tree: %v; body=%q", err, body))
+	}
+	if body, err := h.apiRequestContext(ctx, http.MethodGet, "/api/target/rebuild", nil); err != nil {
+		queryErrors = append(queryErrors, "rebuild status: "+err.Error())
+	} else if err := json.Unmarshal(body, &rebuild); err != nil {
+		queryErrors = append(queryErrors, fmt.Sprintf("decode rebuild status: %v; body=%q", err, body))
+	}
+	if rawURL != "" {
+		parsed, err := url.Parse(rawURL)
+		if err != nil {
+			queryErrors = append(queryErrors, "parse target URL: "+err.Error())
+		} else if endpointID := targetEndpointIDForURL(tree, parsed); endpointID == 0 {
+			queryErrors = append(queryErrors, "endpoint not present in Target tree")
+		} else {
+			path := "/api/target/endpoints/" + strconv.FormatInt(endpointID, 10) + "/parameters"
+			if body, err := h.apiRequestContext(ctx, http.MethodGet, path, nil); err != nil {
+				queryErrors = append(queryErrors, "parameters: "+err.Error())
+			} else if err := json.Unmarshal(body, &parameters); err != nil {
+				queryErrors = append(queryErrors, fmt.Sprintf("decode parameters: %v; body=%q", err, body))
+			}
+		}
+	}
+	return fmt.Sprintf(
+		"ExchangeID=%d ObservationStatus=%q ObservationError=%q History=%#v TargetTree=%#v RebuildStatus=%#v Parameters=%#v QueryErrors=%#v",
+		exchangeID, status, observationErr, history, tree, rebuild, parameters, queryErrors,
+	)
 }
 
 func (h *targetHarness) EnableInterception() {
@@ -1511,6 +1707,191 @@ type targetObserverFunc func(context.Context, *store.Exchange) error
 
 func (fn targetObserverFunc) Observe(ctx context.Context, exchange *store.Exchange) error {
 	return fn(ctx, exchange)
+}
+
+type targetObservationResult struct {
+	Error string
+}
+
+type targetObservationPause struct {
+	entered     chan struct{}
+	release     chan struct{}
+	enteredOnce sync.Once
+	releaseOnce sync.Once
+}
+
+func newTargetObservationPause() *targetObservationPause {
+	return &targetObservationPause{entered: make(chan struct{}), release: make(chan struct{})}
+}
+
+func (p *targetObservationPause) releaseBlock() {
+	p.releaseOnce.Do(func() { close(p.release) })
+}
+
+// targetObservationBarrier adds completion tracking to the real Target service.
+// It records an exchange only after the delegated synchronous Observe call returns.
+type targetObservationBarrier struct {
+	target TargetObserver
+
+	mu          sync.Mutex
+	completed   map[int64]targetObservationResult
+	waiters     map[int64]int
+	changed     chan struct{}
+	nextPause   *targetObservationPause
+	activePause *targetObservationPause
+}
+
+func newTargetObservationBarrier(target TargetObserver) *targetObservationBarrier {
+	return &targetObservationBarrier{
+		target: target, completed: make(map[int64]targetObservationResult),
+		waiters: make(map[int64]int), changed: make(chan struct{}),
+	}
+}
+
+func (o *targetObservationBarrier) Observe(ctx context.Context, exchange *store.Exchange) error {
+	err := o.target.Observe(ctx, exchange)
+	if exchange == nil || exchange.ID == 0 {
+		return err
+	}
+
+	o.mu.Lock()
+	pause := o.nextPause
+	if pause != nil {
+		o.nextPause = nil
+		o.activePause = pause
+	}
+	o.mu.Unlock()
+	if pause != nil {
+		pause.enteredOnce.Do(func() { close(pause.entered) })
+		<-pause.release
+	}
+
+	result := targetObservationResult{}
+	if err != nil {
+		result.Error = err.Error()
+	}
+	o.mu.Lock()
+	o.completed[exchange.ID] = result
+	if o.activePause == pause {
+		o.activePause = nil
+	}
+	o.signalLocked()
+	o.mu.Unlock()
+	return err
+}
+
+func (o *targetObservationBarrier) Wait(ctx context.Context, exchangeID int64) (targetObservationResult, error) {
+	registered := false
+	defer func() {
+		if !registered {
+			return
+		}
+		o.mu.Lock()
+		o.waiters[exchangeID]--
+		if o.waiters[exchangeID] == 0 {
+			delete(o.waiters, exchangeID)
+		}
+		o.signalLocked()
+		o.mu.Unlock()
+	}()
+	for {
+		o.mu.Lock()
+		if result, complete := o.completed[exchangeID]; complete {
+			o.mu.Unlock()
+			return result, nil
+		}
+		if !registered {
+			o.waiters[exchangeID]++
+			registered = true
+			o.signalLocked()
+		}
+		changed := o.changed
+		o.mu.Unlock()
+		select {
+		case <-changed:
+		case <-ctx.Done():
+			return targetObservationResult{}, ctx.Err()
+		}
+	}
+}
+
+func (o *targetObservationBarrier) BlockNextCompletion() error {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if o.nextPause != nil || o.activePause != nil {
+		return errors.New("Target observation completion block is already active")
+	}
+	o.nextPause = newTargetObservationPause()
+	return nil
+}
+
+func (o *targetObservationBarrier) WaitForCompletionBlock(ctx context.Context) error {
+	o.mu.Lock()
+	pause := o.activePause
+	if pause == nil {
+		pause = o.nextPause
+	}
+	o.mu.Unlock()
+	if pause == nil {
+		return errors.New("Target observation completion block is not active")
+	}
+	select {
+	case <-pause.entered:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (o *targetObservationBarrier) WaitForWaiter(ctx context.Context) error {
+	for {
+		o.mu.Lock()
+		for _, count := range o.waiters {
+			if count > 0 {
+				o.mu.Unlock()
+				return nil
+			}
+		}
+		changed := o.changed
+		o.mu.Unlock()
+		select {
+		case <-changed:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+}
+
+func (o *targetObservationBarrier) ReleaseCompletionBlock() {
+	o.mu.Lock()
+	pause := o.activePause
+	if pause == nil {
+		pause = o.nextPause
+	}
+	o.mu.Unlock()
+	if pause != nil {
+		pause.releaseBlock()
+	}
+}
+
+func (o *targetObservationBarrier) Status(exchangeID int64) (string, string) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if result, complete := o.completed[exchangeID]; complete {
+		if result.Error != "" {
+			return "error", result.Error
+		}
+		return "completed", ""
+	}
+	if o.waiters[exchangeID] > 0 {
+		return "waiting", ""
+	}
+	return "pending", ""
+}
+
+func (o *targetObservationBarrier) signalLocked() {
+	close(o.changed)
+	o.changed = make(chan struct{})
 }
 
 type errorReadCloser struct {
