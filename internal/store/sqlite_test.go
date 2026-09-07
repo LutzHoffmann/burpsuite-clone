@@ -56,6 +56,42 @@ func openTestStore(t *testing.T) *SQLiteStore {
 	return store
 }
 
+func TestSQLiteSaveExchangeWaitsForConcurrentWriter(t *testing.T) {
+	store := openTestStore(t)
+	ctx := context.Background()
+	connection, err := store.db.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = connection.Close() })
+	if _, err := connection.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
+		t.Fatal(err)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- store.SaveExchange(ctx, &Exchange{
+			Method: "GET", Scheme: "https", Host: "example.test", Path: "/", StartedAt: time.Now(),
+		})
+	}()
+	select {
+	case err := <-done:
+		t.Fatalf("SaveExchange returned while writer lock was held: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	if _, err := connection.ExecContext(ctx, "COMMIT"); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("SaveExchange after writer release: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("SaveExchange did not resume after writer release")
+	}
+}
+
 func TestSQLiteMigratesVersionFixturesToScopeSchema(t *testing.T) {
 	for _, version := range []int{1, 2} {
 		t.Run("version-"+string(rune('0'+version)), func(t *testing.T) {

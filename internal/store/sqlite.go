@@ -53,7 +53,7 @@ func sqliteDSN(path string) string {
 	if strings.Contains(path, "?") {
 		separator = "&"
 	}
-	return path + separator + "_pragma=foreign_keys%281%29"
+	return path + separator + "_pragma=foreign_keys%281%29&_pragma=busy_timeout%285000%29"
 }
 
 func (s *SQLiteStore) SaveExchange(ctx context.Context, exchange *Exchange) error {

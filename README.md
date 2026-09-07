@@ -9,6 +9,7 @@ v1 focuses on HTTP/HTTPS proxying, interception, history, inspection, Repeater, 
 ## Safety
 
 Use this tool only against systems you own or are authorized to test. Captured traffic and generated certificates stay local by default.
+The unauthenticated API and proxy are intentionally restricted to loopback IP addresses. Network-wide operation requires authentication and client access controls that are not part of v1.
 
 ## Target Scope
 

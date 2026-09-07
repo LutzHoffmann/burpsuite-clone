@@ -14,15 +14,16 @@ jobs:
         with:
           go-version: '1.23'
       - run: go test ./...
+      - run: go test -race ./internal/scope ./internal/store ./internal/target ./internal/proxy ./internal/api
 
-  windows-compile:
+  windows:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
           go-version: '1.23'
-      - run: go test ./internal/certs
+      - run: go test ./...
 
   frontend:
     runs-on: ubuntu-latest
