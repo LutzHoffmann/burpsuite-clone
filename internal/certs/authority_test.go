@@ -3,12 +3,15 @@ package certs
 import (
 	"crypto/rand"
 	"crypto/rsa"
+	"crypto/tls"
 	"crypto/x509"
 	"encoding/pem"
 	"os"
 	"path/filepath"
 	"runtime"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestLoadOrCreateAuthorityPersistsCA(t *testing.T) {
@@ -211,5 +214,45 @@ func TestCertificateForHostUsesBoundedCanonicalCache(t *testing.T) {
 	}
 	if got := len(a.cache); got != 2 {
 		t.Fatalf("cache size = %d, want 2", got)
+	}
+}
+
+func TestCertificateForHostSingleflightsConcurrentGeneration(t *testing.T) {
+	a, err := LoadOrCreateAuthority(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	original := a.generateLeaf
+	entered := make(chan struct{}, 8)
+	release := make(chan struct{})
+	var calls atomic.Int32
+	a.generateLeaf = func(host string) (tls.Certificate, error) {
+		calls.Add(1)
+		entered <- struct{}{}
+		<-release
+		return original(host)
+	}
+
+	results := make(chan error, 8)
+	for range 8 {
+		go func() {
+			_, err := a.CertificateForHost("parallel.example.test")
+			results <- err
+		}()
+	}
+	select {
+	case <-entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("certificate generation did not start")
+	}
+	time.Sleep(50 * time.Millisecond)
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("concurrent generation calls = %d, want 1", got)
+	}
+	close(release)
+	for range 8 {
+		if err := <-results; err != nil {
+			t.Fatal(err)
+		}
 	}
 }

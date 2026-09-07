@@ -99,7 +99,7 @@ func (s *Service) Recover(ctx context.Context) error {
 	if latestErr != nil && !errors.Is(latestErr, sql.ErrNoRows) {
 		return latestErr
 	}
-	if latestErr == nil && latest.Status == "failed" {
+	if latestErr == nil && latest.Status == "failed" && latest.ScopeVersion == state.Version {
 		return nil
 	}
 	if latestErr == nil && latest.Status == "building" {
@@ -226,7 +226,8 @@ func (s *Service) ReplaceRules(ctx context.Context, expectedVersion int64, rules
 	cancelStart()
 	if err != nil {
 		s.recordRebuildStartFailure(state.Version)
-		return state, err
+		log.Printf("target rebuild for scope version %d could not start", state.Version)
+		return state, nil
 	}
 	return state, nil
 }

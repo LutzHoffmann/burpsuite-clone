@@ -37,10 +37,12 @@ type Authority struct {
 	cert    *x509.Certificate
 	key     *rsa.PrivateKey
 
-	mu         sync.Mutex
-	cache      map[string]tls.Certificate
-	cacheOrder []string
-	cacheLimit int
+	mu           sync.Mutex
+	generationMu sync.Mutex
+	cache        map[string]tls.Certificate
+	cacheOrder   []string
+	cacheLimit   int
+	generateLeaf func(string) (tls.Certificate, error)
 }
 
 // LoadOrCreateAuthority loads the CA from dir, creating it when it is absent.
@@ -190,10 +192,12 @@ func createAuthority() (*Authority, error) {
 		return nil, fmt.Errorf("parse certificate authority certificate: %w", err)
 	}
 	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
-	return &Authority{
+	authority := &Authority{
 		certPEM: certPEM, cert: cert, key: key,
 		cache: make(map[string]tls.Certificate), cacheLimit: leafCacheLimit,
-	}, nil
+	}
+	authority.generateLeaf = authority.generateLeafCertificate
+	return authority, nil
 }
 
 func loadAuthority(certPEM, keyPEM []byte, keyPath string) (*Authority, error) {
@@ -223,10 +227,12 @@ func loadAuthority(certPEM, keyPEM []byte, keyPath string) (*Authority, error) {
 	if err := os.Chmod(keyPath, 0o600); err != nil {
 		return nil, fmt.Errorf("restrict certificate authority key permissions: %w", err)
 	}
-	return &Authority{
+	authority := &Authority{
 		certPEM: append([]byte(nil), certPEM...), cert: cert, key: key,
 		cache: make(map[string]tls.Certificate), cacheLimit: leafCacheLimit,
-	}, nil
+	}
+	authority.generateLeaf = authority.generateLeafCertificate
+	return authority, nil
 }
 
 func pemBlockForKey(key *rsa.PrivateKey) ([]byte, error) {
@@ -268,6 +274,40 @@ func (a *Authority) CertificateForHost(host string) (tls.Certificate, error) {
 	}
 	a.mu.Unlock()
 
+	a.generationMu.Lock()
+	defer a.generationMu.Unlock()
+	a.mu.Lock()
+	if certificate, ok := a.cache[host]; ok {
+		a.mu.Unlock()
+		return cloneTLSCertificate(certificate), nil
+	}
+	a.mu.Unlock()
+
+	generator := a.generateLeaf
+	if generator == nil {
+		generator = a.generateLeafCertificate
+	}
+	certificate, err := generator(host)
+	if err != nil {
+		return tls.Certificate{}, err
+	}
+
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	limit := a.cacheLimit
+	if limit <= 0 {
+		limit = leafCacheLimit
+	}
+	if len(a.cacheOrder) >= limit {
+		delete(a.cache, a.cacheOrder[0])
+		a.cacheOrder = a.cacheOrder[1:]
+	}
+	a.cache[host] = certificate
+	a.cacheOrder = append(a.cacheOrder, host)
+	return cloneTLSCertificate(certificate), nil
+}
+
+func (a *Authority) generateLeafCertificate(host string) (tls.Certificate, error) {
 	key, err := rsa.GenerateKey(rand.Reader, keyBits)
 	if err != nil {
 		return tls.Certificate{}, fmt.Errorf("generate host certificate key: %w", err)
@@ -296,23 +336,7 @@ func (a *Authority) CertificateForHost(host string) (tls.Certificate, error) {
 		return tls.Certificate{}, fmt.Errorf("create host certificate: %w", err)
 	}
 	certificate := tls.Certificate{Certificate: [][]byte{der, a.cert.Raw}, PrivateKey: key}
-
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if existing, ok := a.cache[host]; ok {
-		return cloneTLSCertificate(existing), nil
-	}
-	limit := a.cacheLimit
-	if limit <= 0 {
-		limit = leafCacheLimit
-	}
-	if len(a.cacheOrder) >= limit {
-		delete(a.cache, a.cacheOrder[0])
-		a.cacheOrder = a.cacheOrder[1:]
-	}
-	a.cache[host] = certificate
-	a.cacheOrder = append(a.cacheOrder, host)
-	return cloneTLSCertificate(certificate), nil
+	return certificate, nil
 }
 
 func normalizeCertificateHost(host string) (string, error) {

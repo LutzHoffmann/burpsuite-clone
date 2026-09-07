@@ -242,8 +242,8 @@ func TestServiceReplaceRulesExposesRebuildStartFailure(t *testing.T) {
 	service := newRecoveredService(t, repository, sqlite, hub)
 
 	state, err := service.ReplaceRules(context.Background(), 0, includeRule("example.test", "/"))
-	if err == nil {
-		t.Fatal("ReplaceRules succeeded despite generation failure")
+	if err != nil {
+		t.Fatalf("committed scope was reported as failed: %v", err)
 	}
 	status, statusErr := service.RebuildStatus(context.Background())
 	if statusErr != nil || status.ScopeVersion != state.Version || status.Status != "failed" {
@@ -252,6 +252,33 @@ func TestServiceReplaceRulesExposesRebuildStartFailure(t *testing.T) {
 	received := collectUntilEvent(t, subscriber, "target.rebuild.failed")
 	if received[len(received)-1].Data != status {
 		t.Fatalf("failed event = %#v, status = %#v", received[len(received)-1].Data, status)
+	}
+}
+
+func TestServiceRecoverRebuildsWhenLatestFailureIsForOlderScope(t *testing.T) {
+	repository := openTargetRepository(t)
+	ctx := context.Background()
+	generationID, err := repository.CreateTargetGeneration(ctx, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := repository.FailTargetGeneration(ctx, generationID, "projection failed"); err != nil {
+		t.Fatal(err)
+	}
+	state, err := repository.ReplaceScopeRules(ctx, 0, includeRule("example.test", "/"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	initial, _ := scope.Compile(0, nil)
+	service := NewService(repository, scope.NewManager(initial), events.NewHub(), testLimits)
+	t.Cleanup(service.Close)
+
+	if err := service.Recover(ctx); err != nil {
+		t.Fatal(err)
+	}
+	status := waitForRebuildStatus(t, service, "active")
+	if status.ScopeVersion != state.Version || status.ActiveScopeVersion != state.Version {
+		t.Fatalf("status = %#v, scope version = %d", status, state.Version)
 	}
 }
 
