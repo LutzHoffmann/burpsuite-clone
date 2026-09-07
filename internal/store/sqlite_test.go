@@ -902,12 +902,55 @@ func TestSQLiteTargetTreeIsDeterministicAndAggregatesEveryLevel(t *testing.T) {
 		t.Fatalf("users aggregate = %#v", users)
 	}
 	for _, method := range users.Children {
-		if method.ID == 0 || method.Path != "" || method.Host != "" || len(method.Children) != 0 {
+		if method.ID == 0 || method.Path != "/api/users" || method.Host != "" || len(method.Children) != 0 {
 			t.Fatalf("method leaf = %#v", method)
 		}
 	}
 	if tree[0].ID != 0 || len(tree[0].Children) != 1 || tree[0].Children[0].Method != "GET" || tree[0].Children[0].ID == 0 {
 		t.Fatalf("root path method = %#v", tree[0])
+	}
+}
+
+func TestSQLiteTargetTreeMethodLeavesRetainExactPaths(t *testing.T) {
+	repository := openTestStore(t)
+	ctx := context.Background()
+	generationID, err := repository.CreateTargetGeneration(ctx, 1, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index, endpointPath := range []string{"/api", "/api/", "/api//x"} {
+		if err := repository.UpsertTargetObservation(ctx, generationID, TargetObservation{
+			Key: TargetEndpointKey{
+				Scheme: "https", Host: "example.test", Port: 443, Path: endpointPath, Method: "GET",
+			},
+			ExchangeID: saveTargetExchangeAt(t, repository, time.Unix(int64(index+1), 0), 200, false),
+			StartedAt:  time.Unix(int64(index+1), 0),
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := repository.ActivateTargetGeneration(ctx, generationID); err != nil {
+		t.Fatal(err)
+	}
+	tree, err := repository.ListTargetTree(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	paths := make(map[string]bool)
+	var visit func([]TargetTreeNode)
+	visit = func(nodes []TargetTreeNode) {
+		for _, node := range nodes {
+			if node.ID != 0 {
+				paths[node.Path] = true
+			}
+			visit(node.Children)
+		}
+	}
+	visit(tree)
+	for _, endpointPath := range []string{"/api", "/api/", "/api//x"} {
+		if !paths[endpointPath] {
+			t.Fatalf("method leaf paths = %#v, missing %q", paths, endpointPath)
+		}
 	}
 }
 

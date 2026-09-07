@@ -54,13 +54,14 @@ type Server struct {
 }
 
 type preparedRequest struct {
-	forward     *http.Request
-	capture     *capturingReadCloser
-	headers     http.Header
-	intercepted bool
-	dropped     bool
-	droppedBody []byte
-	decision    scope.Decision
+	forward       *http.Request
+	capture       *capturingReadCloser
+	headers       http.Header
+	intercepted   bool
+	dropped       bool
+	scopeRejected bool
+	droppedBody   []byte
+	decision      scope.Decision
 }
 
 func NewServer(cfg Config) *Server {
@@ -112,8 +113,9 @@ func (s *Server) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	startedAt := time.Now().UTC()
-	decision := s.classify(r)
-	prepared, err := s.prepareRequest(r, decision)
+	rules := s.currentScopeRules()
+	decision := classifyWithRules(rules, r)
+	prepared, err := s.prepareRequest(r, decision, rules)
 	if err != nil {
 		s.savePreparationFailure(r, decision, startedAt, err)
 		http.Error(w, "intercept request", http.StatusGatewayTimeout)
@@ -122,6 +124,11 @@ func (s *Server) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	if prepared.dropped {
 		s.saveDroppedExchange(r, prepared, startedAt)
 		http.Error(w, "request dropped", http.StatusForbidden)
+		return
+	}
+	if prepared.scopeRejected {
+		s.saveScopeRejectedExchange(prepared, startedAt)
+		http.Error(w, "edited request is out of scope", http.StatusForbidden)
 		return
 	}
 
@@ -213,8 +220,9 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) forwardHTTPS(client net.Conn, request *http.Request) bool {
 	startedAt := time.Now().UTC()
-	decision := s.classify(request)
-	prepared, err := s.prepareRequest(request, decision)
+	rules := s.currentScopeRules()
+	decision := classifyWithRules(rules, request)
+	prepared, err := s.prepareRequest(request, decision, rules)
 	if err != nil {
 		s.savePreparationFailure(request, decision, startedAt, err)
 		return writeTunnelError(client, request, http.StatusGatewayTimeout, "intercept request")
@@ -222,6 +230,10 @@ func (s *Server) forwardHTTPS(client net.Conn, request *http.Request) bool {
 	if prepared.dropped {
 		s.saveDroppedExchange(request, prepared, startedAt)
 		return writeTunnelError(client, request, http.StatusForbidden, "request dropped")
+	}
+	if prepared.scopeRejected {
+		s.saveScopeRejectedExchange(prepared, startedAt)
+		return writeTunnelError(client, request, http.StatusForbidden, "edited request is out of scope")
 	}
 
 	response, err := s.cfg.Transport.RoundTrip(prepared.forward)
@@ -246,18 +258,25 @@ func (s *Server) forwardHTTPS(client net.Conn, request *http.Request) bool {
 	return writeErr == nil && !request.Close && !response.Close
 }
 
-func (s *Server) classify(request *http.Request) scope.Decision {
+func (s *Server) currentScopeRules() *scope.RuleSet {
 	if s.cfg.Scope == nil {
+		return nil
+	}
+	return s.cfg.Scope.Current()
+}
+
+func classifyWithRules(rules *scope.RuleSet, request *http.Request) scope.Decision {
+	if rules == nil {
 		return scope.Decision{InScope: false, Reason: "no_include"}
 	}
-	return s.cfg.Scope.Current().Classify(scope.Target{
+	return rules.Classify(scope.Target{
 		Scheme: request.URL.Scheme,
 		Host:   request.URL.Host,
 		Path:   request.URL.Path,
 	})
 }
 
-func (s *Server) prepareRequest(request *http.Request, captureDecision scope.Decision) (*preparedRequest, error) {
+func (s *Server) prepareRequest(request *http.Request, captureDecision scope.Decision, captureRules *scope.RuleSet) (*preparedRequest, error) {
 	if !captureDecision.InScope || s.cfg.Intercept == nil || !s.cfg.Intercept.Matches(intercept.MatchRequest{
 		Method: request.Method,
 		Host:   request.URL.Host,
@@ -326,9 +345,16 @@ func (s *Server) prepareRequest(request *http.Request, captureDecision scope.Dec
 	forward.Body = capture
 	forward.ContentLength = int64(len(editedBody))
 	stripHopByHopHeaders(forward.Header)
+	editedDecision := classifyWithRules(captureRules, forward)
+	if !editedDecision.InScope {
+		return &preparedRequest{
+			forward: forward, capture: capture, headers: cloneHeaders(headers), intercepted: true,
+			scopeRejected: true, droppedBody: append([]byte(nil), editedBody...), decision: editedDecision,
+		}, nil
+	}
 	return &preparedRequest{
 		forward: forward, capture: capture, headers: cloneHeaders(headers), intercepted: true,
-		decision: captureDecision,
+		decision: editedDecision,
 	}, nil
 }
 
@@ -405,6 +431,15 @@ func (s *Server) saveDroppedExchange(request *http.Request, prepared *preparedRe
 		RequestSize: int64(len(prepared.droppedBody)),
 		Request:     store.RequestData{Headers: prepared.headers, Body: append([]byte(nil), prepared.droppedBody...)},
 	})
+}
+
+func (s *Server) saveScopeRejectedExchange(prepared *preparedRequest, startedAt time.Time) {
+	exchange := s.exchangeFromPrepared(prepared, startedAt)
+	exchange.Error = true
+	exchange.ErrorMessage = "edited request is out of scope"
+	exchange.RequestSize = int64(len(prepared.droppedBody))
+	exchange.Request.Body = append([]byte(nil), prepared.droppedBody...)
+	s.saveExchange(exchange)
 }
 
 func (s *Server) exchangeFromPrepared(prepared *preparedRequest, startedAt time.Time) *store.Exchange {

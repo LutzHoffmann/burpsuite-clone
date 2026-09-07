@@ -20,6 +20,7 @@ const (
 	rebuildPageSize         = 200
 	rebuildProgressRecords  = 100
 	rebuildProgressInterval = 250 * time.Millisecond
+	rebuildStartTimeout     = 30 * time.Second
 	failurePersistAttempts  = 5
 	failurePersistDelay     = 5 * time.Millisecond
 )
@@ -220,7 +221,11 @@ func (s *Service) ReplaceRules(ctx context.Context, expectedVersion int64, rules
 	}
 	s.scope.Replace(compiled)
 	s.publish("scope.changed", scopeChangedPayload{Version: state.Version})
-	if err := s.startRebuildLocked(ctx, state.Version, compiled); err != nil {
+	startContext, cancelStart := context.WithTimeout(context.Background(), rebuildStartTimeout)
+	err = s.startRebuildLocked(startContext, state.Version, compiled)
+	cancelStart()
+	if err != nil {
+		s.recordRebuildStartFailure(state.Version)
 		return state, err
 	}
 	return state, nil
@@ -251,6 +256,13 @@ func (s *Service) RetryRebuild(ctx context.Context) error {
 }
 
 func (s *Service) RebuildStatus(ctx context.Context) (store.RebuildStatus, error) {
+	s.mu.Lock()
+	failedStatus := s.failedStatus
+	rebuildRunning := s.rebuildRunning
+	s.mu.Unlock()
+	if failedStatus != nil && !rebuildRunning {
+		return *failedStatus, nil
+	}
 	generation, err := s.latestTargetGeneration(ctx)
 	if errors.Is(err, sql.ErrNoRows) {
 		return store.RebuildStatus{Status: "idle"}, nil
@@ -260,9 +272,9 @@ func (s *Service) RebuildStatus(ctx context.Context) (store.RebuildStatus, error
 	}
 	s.mu.Lock()
 	activeScopeVersion := s.activeScopeVersion
-	failedStatus := s.failedStatus
+	failedStatus = s.failedStatus
 	rebuildGenerationID := s.rebuildGenerationID
-	rebuildRunning := s.rebuildRunning
+	rebuildRunning = s.rebuildRunning
 	s.mu.Unlock()
 	if rebuildRunning && rebuildGenerationID == generation.ID {
 		status := rebuildStatus(generation, activeScopeVersion)
@@ -274,6 +286,17 @@ func (s *Service) RebuildStatus(ctx context.Context) (store.RebuildStatus, error
 		return *failedStatus, nil
 	}
 	return rebuildStatus(generation, activeScopeVersion), nil
+}
+
+func (s *Service) recordRebuildStartFailure(scopeVersion int64) {
+	s.mu.Lock()
+	status := store.RebuildStatus{
+		ScopeVersion: scopeVersion, ActiveScopeVersion: s.activeScopeVersion,
+		Status: "failed", Error: errProjectionFailed.Error(),
+	}
+	s.failedStatus = &status
+	s.mu.Unlock()
+	s.publish("target.rebuild.failed", status)
 }
 
 func (s *Service) latestTargetGeneration(ctx context.Context) (store.TargetGeneration, error) {
@@ -640,13 +663,16 @@ func enrichTreeScope(node *store.TargetTreeNode, rules *scope.RuleSet, scheme, h
 	if node.Port != 0 {
 		port = node.Port
 	}
-	if node.Path != "" {
+	if node.Path != "" && !strings.HasPrefix(node.Path, "/") {
 		path = append(append([]string(nil), path...), node.Path)
 	}
 	if node.ID != 0 {
-		endpointPath := "/"
-		if len(path) > 0 {
-			endpointPath += strings.Join(path, "/")
+		endpointPath := node.Path
+		if !strings.HasPrefix(endpointPath, "/") {
+			endpointPath = "/"
+			if len(path) > 0 {
+				endpointPath += strings.Join(path, "/")
+			}
 		}
 		node.InScope = classifyEndpointKey(rules, store.TargetEndpointKey{Scheme: scheme, Host: host, Port: port, Path: endpointPath, Method: node.Method})
 		return node.InScope
@@ -675,13 +701,16 @@ func endpointIDForKey(tree []store.TargetTreeNode, key store.TargetEndpointKey) 
 			if node.Port != 0 {
 				nextPort = node.Port
 			}
-			if node.Path != "" {
+			if node.Path != "" && !strings.HasPrefix(node.Path, "/") {
 				nextPath = append(append([]string(nil), path...), node.Path)
 			}
 			if node.ID != 0 {
-				endpointPath := "/"
-				if len(nextPath) > 0 {
-					endpointPath += strings.Join(nextPath, "/")
+				endpointPath := node.Path
+				if !strings.HasPrefix(endpointPath, "/") {
+					endpointPath = "/"
+					if len(nextPath) > 0 {
+						endpointPath += strings.Join(nextPath, "/")
+					}
 				}
 				if nextScheme == key.Scheme && nextHost == key.Host && nextPort == key.Port && endpointPath == key.Path && node.Method == key.Method {
 					return node.ID

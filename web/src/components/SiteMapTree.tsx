@@ -30,7 +30,7 @@ function hasMime(node: TargetTreeNode, mime: string) {
 }
 
 function contextFor(node: TargetTreeNode, parent: NodeContext): NodeContext {
-  const path = node.path ? (node.path.startsWith('/') ? node.path.split('/').filter(Boolean) : [...parent.path, node.path]) : parent.path;
+  const path = node.path ? (node.path.startsWith('/') ? node.path.split('/').slice(1) : [...parent.path, node.path]) : parent.path;
   return { scheme: node.scheme || parent.scheme, host: node.host || parent.host, port: node.port || parent.port, path };
 }
 
@@ -42,6 +42,7 @@ function nodeLabel(node: TargetTreeNode, context: NodeContext) {
   if (node.method) return `${node.method} ${pathLabel(context)}`;
   if (node.host) return node.port ? `${node.host}:${node.port}` : node.host;
   if (node.path) return node.path;
+  if (!node.scheme && !node.host && !node.method) return '(empty segment)';
   return node.scheme || 'Site map node';
 }
 

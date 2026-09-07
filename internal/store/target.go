@@ -19,6 +19,9 @@ var targetDiagnosticCodes = map[string]struct{}{
 	"body_unsupported_mime":          {},
 	"body_binary":                    {},
 	"form_malformed":                 {},
+	"parameter_field_limit_exceeded": {},
+	"query_field_limit_exceeded":     {},
+	"cookie_field_limit_exceeded":    {},
 	"json_malformed":                 {},
 	"json_depth_exceeded":            {},
 	"json_field_limit_exceeded":      {},
@@ -694,7 +697,7 @@ func addTargetTreeEndpoint(roots map[targetAuthorityKey]*targetTreeBuilder, endp
 	method.Scheme = ""
 	method.Host = ""
 	method.Port = 0
-	method.Path = ""
+	method.Path = endpoint.Path
 	method.Children = nil
 	parent.children["method\x00"+endpoint.Method] = &targetTreeBuilder{node: method, children: make(map[string]*targetTreeBuilder)}
 }

@@ -214,6 +214,47 @@ func TestServiceProgressPersistenceErrorFailsRebuild(t *testing.T) {
 	}
 }
 
+func TestServiceReplaceRulesOwnsRebuildStartContext(t *testing.T) {
+	sqlite := openTargetRepository(t)
+	repository := newControlledRepository(sqlite)
+	ctx, cancel := context.WithCancel(context.Background())
+	repository.cancelAfterScopeReplace = cancel
+	service := newRecoveredService(t, repository, sqlite, events.NewHub())
+
+	state, err := service.ReplaceRules(ctx, 0, includeRule("example.test", "/"))
+	if err != nil {
+		t.Fatalf("ReplaceRules after committed request cancellation: %v", err)
+	}
+	waitForRebuildWorker(t, service)
+	status, err := service.RebuildStatus(context.Background())
+	if err != nil || status.ScopeVersion != state.Version || status.Status != "active" {
+		t.Fatalf("status = %#v, err = %v", status, err)
+	}
+}
+
+func TestServiceReplaceRulesExposesRebuildStartFailure(t *testing.T) {
+	sqlite := openTargetRepository(t)
+	repository := newControlledRepository(sqlite)
+	repository.generationFailure = errors.New("generation unavailable")
+	hub := events.NewHub()
+	subscriber, unsubscribe := hub.Subscribe()
+	defer unsubscribe()
+	service := newRecoveredService(t, repository, sqlite, hub)
+
+	state, err := service.ReplaceRules(context.Background(), 0, includeRule("example.test", "/"))
+	if err == nil {
+		t.Fatal("ReplaceRules succeeded despite generation failure")
+	}
+	status, statusErr := service.RebuildStatus(context.Background())
+	if statusErr != nil || status.ScopeVersion != state.Version || status.Status != "failed" {
+		t.Fatalf("status = %#v, err = %v", status, statusErr)
+	}
+	received := collectUntilEvent(t, subscriber, "target.rebuild.failed")
+	if received[len(received)-1].Data != status {
+		t.Fatalf("failed event = %#v, status = %#v", received[len(received)-1].Data, status)
+	}
+}
+
 func TestServiceFailureMarkRetriesTransientContention(t *testing.T) {
 	sqlite := openTargetRepository(t)
 	saveExchange(t, sqlite, "https", "example.test", "/api", "")
@@ -854,32 +895,49 @@ func eventTypes(received []events.Event) []string {
 type controlledRepository struct {
 	Repository
 
-	mu                 sync.Mutex
-	pageFailure        error
-	upsertFailure      error
-	blockPage          bool
-	pageStarted        chan struct{}
-	releasePage        chan struct{}
-	pageSignalOnce     sync.Once
-	blockUpsert        bool
-	upsertStarted      chan struct{}
-	releaseUpsert      chan struct{}
-	upsertOnce         sync.Once
-	blockActivation    bool
-	activationStarted  chan struct{}
-	releaseActivation  chan struct{}
-	activationOnce     sync.Once
-	progressFailures   []error
-	markFailures       []error
-	permanentMarkError error
-	markAttempts       int
-	upsertAttempts     int
-	cancelled          []int64
-	prunes             int
+	mu                      sync.Mutex
+	pageFailure             error
+	upsertFailure           error
+	blockPage               bool
+	pageStarted             chan struct{}
+	releasePage             chan struct{}
+	pageSignalOnce          sync.Once
+	blockUpsert             bool
+	upsertStarted           chan struct{}
+	releaseUpsert           chan struct{}
+	upsertOnce              sync.Once
+	blockActivation         bool
+	activationStarted       chan struct{}
+	releaseActivation       chan struct{}
+	activationOnce          sync.Once
+	progressFailures        []error
+	markFailures            []error
+	permanentMarkError      error
+	markAttempts            int
+	upsertAttempts          int
+	cancelled               []int64
+	prunes                  int
+	cancelAfterScopeReplace context.CancelFunc
+	generationFailure       error
 }
 
 func newControlledRepository(repository Repository) *controlledRepository {
 	return &controlledRepository{Repository: repository}
+}
+
+func (r *controlledRepository) ReplaceScopeRules(ctx context.Context, expectedVersion int64, rules []scope.Rule) (scope.State, error) {
+	state, err := r.Repository.ReplaceScopeRules(ctx, expectedVersion, rules)
+	if err == nil && r.cancelAfterScopeReplace != nil {
+		r.cancelAfterScopeReplace()
+	}
+	return state, err
+}
+
+func (r *controlledRepository) CreateTargetGeneration(ctx context.Context, scopeVersion, total int64) (int64, error) {
+	if r.generationFailure != nil {
+		return 0, r.generationFailure
+	}
+	return r.Repository.CreateTargetGeneration(ctx, scopeVersion, total)
 }
 
 func (r *controlledRepository) ListExchangesPage(ctx context.Context, afterID, throughID int64, limit int) ([]store.Exchange, error) {

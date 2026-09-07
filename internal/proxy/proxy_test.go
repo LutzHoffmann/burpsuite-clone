@@ -873,7 +873,9 @@ func targetEndpoints(tree []store.TargetTreeNode) []targetEndpoint {
 				nodePort, _ = effectiveURLPort(&url.URL{Scheme: nodeScheme}, nodeScheme)
 			}
 			nodePath := path
-			if node.Path != "" {
+			if node.ID != 0 && strings.HasPrefix(node.Path, "/") {
+				nodePath = node.Path
+			} else if node.Path != "" {
 				nodePath += "/" + node.Path
 			}
 			if node.ID != 0 && node.Method != "" {
@@ -1267,6 +1269,178 @@ func TestProxyStoresCaptureTimeScopeDecisionWhenRulesChangeDuringInterception(t 
 
 	exchange := waitForSavedExchanges(t, mem, 1)[0]
 	assertScopeDecision(t, exchange, true, 31, 301)
+}
+
+func TestProxyRejectsOutOfScopeInterceptEditUsingCaptureTimeRules(t *testing.T) {
+	var targetCalls atomic.Int32
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		targetCalls.Add(1)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(target.Close)
+	targetURL := mustParseURL(t, target.URL)
+	initial, err := scope.Compile(41, []scope.Rule{
+		{ID: 401, Enabled: true, Action: scope.ActionInclude, HostPattern: targetURL.Hostname(), PathPrefix: "/allowed"},
+		{ID: 402, Enabled: true, Action: scope.ActionExclude, HostPattern: targetURL.Hostname(), PathPrefix: "/allowed/excluded"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	replacement, err := scope.Compile(42, []scope.Rule{{
+		ID: 403, Enabled: true, Action: scope.ActionInclude, HostPattern: targetURL.Hostname(), PathPrefix: "/",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager := scope.NewManager(initial)
+	queue := intercept.NewQueue(2 * time.Second)
+	mem := &memoryStore{}
+	srv := NewServer(Config{
+		Store: mem, BodyLimitBytes: 1024, Scope: manager,
+		Intercept: intercept.NewController(queue, true, []intercept.Rule{{Enabled: true}}),
+	})
+	proxyServer := httptest.NewServer(http.HandlerFunc(srv.handleHTTP))
+	t.Cleanup(proxyServer.Close)
+	client := &http.Client{Transport: &http.Transport{Proxy: http.ProxyURL(mustParseURL(t, proxyServer.URL))}}
+	t.Cleanup(client.CloseIdleConnections)
+
+	responses := make(chan *http.Response, 1)
+	errs := make(chan error, 1)
+	go func() {
+		request, err := http.NewRequest(http.MethodPost, target.URL+"/allowed/original", strings.NewReader("before"))
+		if err != nil {
+			errs <- err
+			return
+		}
+		request.Header.Set("Content-Type", "text/plain")
+		response, err := client.Do(request)
+		if err != nil {
+			errs <- err
+			return
+		}
+		responses <- response
+	}()
+
+	item := waitForIntercept(t, queue)
+	manager.Replace(replacement)
+	editedURL := target.URL + "/allowed/excluded?source=intercept"
+	if err := queue.Forward(item.ID, intercept.RequestEdit{
+		Method: http.MethodPatch, URL: editedURL, Headers: item.Headers,
+		Body: []byte("after"), BodySet: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-errs:
+		t.Fatal(err)
+	case response := <-responses:
+		defer response.Body.Close()
+		if response.StatusCode != http.StatusForbidden {
+			t.Fatalf("status = %d", response.StatusCode)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("rejected request did not complete")
+	}
+
+	if targetCalls.Load() != 0 {
+		t.Fatalf("out-of-scope target calls = %d", targetCalls.Load())
+	}
+	exchange := waitForSavedExchanges(t, mem, 1)[0]
+	if exchange.Method != http.MethodPatch || exchange.Scheme != "http" || exchange.Host != targetURL.Host ||
+		exchange.Path != "/allowed/excluded" || exchange.Query != "source=intercept" {
+		t.Fatalf("persisted edited request = %#v", exchange)
+	}
+	if exchange.InScope || exchange.ScopeVersion != 41 || exchange.ScopeRuleID == nil || *exchange.ScopeRuleID != 402 {
+		t.Fatalf("scope decision = in:%t version:%d rule:%v", exchange.InScope, exchange.ScopeVersion, exchange.ScopeRuleID)
+	}
+	if !exchange.Intercepted || !exchange.Error || !strings.Contains(exchange.ErrorMessage, "out of scope") {
+		t.Fatalf("rejected exchange = %#v", exchange)
+	}
+	if exchange.RequestSize != 5 || string(exchange.Request.Body) != "after" {
+		t.Fatalf("persisted edited body = size:%d body:%q", exchange.RequestSize, exchange.Request.Body)
+	}
+}
+
+func TestProxyForwardsStillInScopeInterceptURLStore(t *testing.T) {
+	type receivedRequest struct {
+		method string
+		path   string
+		query  string
+		body   string
+	}
+	received := make(chan receivedRequest, 1)
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		body, _ := io.ReadAll(request.Body)
+		received <- receivedRequest{
+			method: request.Method, path: request.URL.Path, query: request.URL.RawQuery, body: string(body),
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(target.Close)
+	manager := scopeManagerForURL(t, target.URL+"/allowed", 43, 404)
+	queue := intercept.NewQueue(2 * time.Second)
+	mem := &memoryStore{}
+	srv := NewServer(Config{
+		Store: mem, BodyLimitBytes: 1024, Scope: manager,
+		Intercept: intercept.NewController(queue, true, []intercept.Rule{{Enabled: true}}),
+	})
+	proxyServer := httptest.NewServer(http.HandlerFunc(srv.handleHTTP))
+	t.Cleanup(proxyServer.Close)
+	client := &http.Client{Transport: &http.Transport{Proxy: http.ProxyURL(mustParseURL(t, proxyServer.URL))}}
+	t.Cleanup(client.CloseIdleConnections)
+
+	responses := make(chan *http.Response, 1)
+	errs := make(chan error, 1)
+	go func() {
+		request, err := http.NewRequest(http.MethodPost, target.URL+"/allowed/original", strings.NewReader("before"))
+		if err != nil {
+			errs <- err
+			return
+		}
+		request.Header.Set("Content-Type", "text/plain")
+		response, err := client.Do(request)
+		if err != nil {
+			errs <- err
+			return
+		}
+		responses <- response
+	}()
+
+	item := waitForIntercept(t, queue)
+	if err := queue.Forward(item.ID, intercept.RequestEdit{
+		Method: http.MethodPut, URL: target.URL + "/allowed/edited?source=intercept", Headers: item.Headers,
+		Body: []byte("after"), BodySet: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-errs:
+		t.Fatal(err)
+	case response := <-responses:
+		defer response.Body.Close()
+		if response.StatusCode != http.StatusNoContent {
+			t.Fatalf("status = %d", response.StatusCode)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("forwarded request did not complete")
+	}
+
+	select {
+	case request := <-received:
+		if request != (receivedRequest{method: http.MethodPut, path: "/allowed/edited", query: "source=intercept", body: "after"}) {
+			t.Fatalf("upstream request = %#v", request)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("upstream did not receive edited request")
+	}
+	exchange := waitForSavedExchanges(t, mem, 1)[0]
+	if exchange.Method != http.MethodPut || exchange.Path != "/allowed/edited" || exchange.Query != "source=intercept" {
+		t.Fatalf("persisted edited request = %#v", exchange)
+	}
+	assertScopeDecision(t, exchange, true, 43, 404)
+	if string(exchange.Request.Body) != "after" {
+		t.Fatalf("persisted edited body = %q", exchange.Request.Body)
+	}
 }
 
 func TestHTTPProxyCapturesExchange(t *testing.T) {

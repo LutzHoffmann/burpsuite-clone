@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -100,6 +101,85 @@ func TestAnalyzeExtractsJSONCompositeTypesAndArrayPaths(t *testing.T) {
 		{Location: "json", Name: "items[].id", ValueType: "number"},
 		{Location: "json", Name: "nested.name", ValueType: "string"},
 		{Location: "json", Name: "nothing", ValueType: "null"},
+	})
+}
+
+func TestAnalyzeStopsQueryTokenizationAtTotalFieldLimit(t *testing.T) {
+	observation := analyzeWithLimits(t, &store.Exchange{
+		Scheme: "http", Host: "example.test", Path: "/", Method: "GET",
+		Query:   "first=query-secret-1&second=query-secret-2&third=query-secret-3",
+		Request: store.RequestData{Headers: http.Header{"Cookie": {"session=cookie-secret"}}},
+	}, Limits{MaxJSONDepth: 16, MaxFields: 2, MaxMultipartFields: 100})
+	assertParameters(t, observation.Parameters, []store.TargetParameter{
+		{Location: "query", Name: "first", ValueType: "string"},
+		{Location: "query", Name: "second", ValueType: "string"},
+	})
+	assertValueFreeDiagnostic(t, observation, "query_field_limit_exceeded", []string{
+		"query-secret-1", "query-secret-2", "query-secret-3", "cookie-secret",
+	})
+}
+
+func TestAnalyzeStopsCookieTokenizationAtRemainingFieldLimit(t *testing.T) {
+	observation := analyzeWithLimits(t, &store.Exchange{
+		Scheme: "http", Host: "example.test", Path: "/", Method: "GET", Query: "page=query-secret",
+		Request: store.RequestData{Headers: http.Header{"Cookie": {"first=cookie-secret-1; second=cookie-secret-2; third=cookie-secret-3"}}},
+	}, Limits{MaxJSONDepth: 16, MaxFields: 3, MaxMultipartFields: 100})
+	assertParameters(t, observation.Parameters, []store.TargetParameter{
+		{Location: "query", Name: "page", ValueType: "string"},
+		{Location: "cookie", Name: "first", ValueType: "string"},
+		{Location: "cookie", Name: "second", ValueType: "string"},
+	})
+	assertValueFreeDiagnostic(t, observation, "cookie_field_limit_exceeded", []string{
+		"query-secret", "cookie-secret-1", "cookie-secret-2", "cookie-secret-3",
+	})
+}
+
+func TestAnalyzeSharesTotalFieldLimitWithBodyParameters(t *testing.T) {
+	observation := analyzeWithLimits(t, &store.Exchange{
+		Scheme: "http", Host: "example.test", Path: "/", Method: "POST", Query: "page=1",
+		Request: store.RequestData{
+			Headers: http.Header{"Content-Type": {"application/json"}, "Cookie": {"session=secret"}},
+			Body:    []byte(`{"first":1,"second":2}`),
+		},
+	}, Limits{MaxJSONDepth: 16, MaxFields: 3, MaxMultipartFields: 100})
+	assertParameters(t, observation.Parameters, []store.TargetParameter{
+		{Location: "query", Name: "page", ValueType: "string"},
+		{Location: "cookie", Name: "session", ValueType: "string"},
+	})
+	if observation.ParseDiagnostic != "json_field_limit_exceeded" {
+		t.Fatalf("diagnostic = %q, want json_field_limit_exceeded", observation.ParseDiagnostic)
+	}
+}
+
+func TestAnalyzeNonPositiveMaxFieldsDisablesAllParameterParsing(t *testing.T) {
+	for _, maxFields := range []int{0, -1} {
+		t.Run(strconv.Itoa(maxFields), func(t *testing.T) {
+			observation := analyzeWithLimits(t, &store.Exchange{
+				Scheme: "http", Host: "example.test", Path: "/", Method: "POST", Query: "page=secret",
+				Request: store.RequestData{
+					Headers: http.Header{"Content-Type": {"application/json"}, "Cookie": {"session=secret"}},
+					Body:    []byte(`{"token":"secret"}`),
+				},
+			}, Limits{MaxJSONDepth: 16, MaxFields: maxFields, MaxMultipartFields: 100})
+			if len(observation.Parameters) != 0 {
+				t.Fatalf("parameters = %#v, want none", observation.Parameters)
+			}
+			if observation.ParseDiagnostic != "parameter_field_limit_exceeded" {
+				t.Fatalf("diagnostic = %q, want parameter_field_limit_exceeded", observation.ParseDiagnostic)
+			}
+		})
+	}
+}
+
+func TestAnalyzeEncodesJSONPathComponentsWithoutCollisions(t *testing.T) {
+	observation := analyze(t, &store.Exchange{
+		Scheme: "http", Host: "example.test", Path: "/payload", Method: "POST",
+		Request: store.RequestData{Headers: http.Header{"Content-Type": {"application/json"}}, Body: []byte(`{"a.b":1,"a":{"b":2},"items[]":3}`)},
+	})
+	assertParameters(t, observation.Parameters, []store.TargetParameter{
+		{Location: "json", Name: `a\.b`, ValueType: "number"},
+		{Location: "json", Name: "a.b", ValueType: "number"},
+		{Location: "json", Name: `items\[\]`, ValueType: "number"},
 	})
 }
 
@@ -232,6 +312,22 @@ func assertParameters(t *testing.T, got, want []store.TargetParameter) {
 	slices.SortFunc(want, compareTargetParameter)
 	if !slices.Equal(got, want) {
 		t.Fatalf("parameters = %#v, want %#v", got, want)
+	}
+}
+
+func assertValueFreeDiagnostic(t *testing.T, observation store.TargetObservation, want string, secrets []string) {
+	t.Helper()
+	if observation.ParseDiagnostic != want {
+		t.Fatalf("diagnostic = %q, want %q", observation.ParseDiagnostic, want)
+	}
+	serialized, err := json.Marshal(observation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, secret := range secrets {
+		if strings.Contains(string(serialized), secret) {
+			t.Fatalf("serialized observation contains %q: %s", secret, serialized)
+		}
 	}
 }
 

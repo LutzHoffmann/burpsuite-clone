@@ -10,6 +10,7 @@ import (
 	"mime/multipart"
 	"net"
 	"net/http"
+	"net/textproto"
 	"net/url"
 	"slices"
 	"strconv"
@@ -17,6 +18,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/lutzifer/burpsuite-clone/internal/store"
+	"golang.org/x/net/http/httpguts"
 	"golang.org/x/net/idna"
 )
 
@@ -26,6 +28,9 @@ const (
 	diagnosticBodyUnsupportedMIME    = "body_unsupported_mime"
 	diagnosticBodyBinary             = "body_binary"
 	diagnosticFormMalformed          = "form_malformed"
+	diagnosticParameterFieldLimit    = "parameter_field_limit_exceeded"
+	diagnosticQueryFieldLimit        = "query_field_limit_exceeded"
+	diagnosticCookieFieldLimit       = "cookie_field_limit_exceeded"
 	diagnosticJSONMalformed          = "json_malformed"
 	diagnosticJSONDepthExceeded      = "json_depth_exceeded"
 	diagnosticJSONFieldLimitExceeded = "json_field_limit_exceeded"
@@ -58,13 +63,31 @@ func Analyze(exchange *store.Exchange, limits Limits) (store.TargetObservation, 
 		ResponseMIME: responseMIME,
 		Error:        exchange.Error,
 	}
+	if limits.MaxFields <= 0 {
+		observation.ParseDiagnostic = diagnosticParameterFieldLimit
+		return observation, nil
+	}
 
-	parameters := make([]store.TargetParameter, 0)
-	parameters = append(parameters, queryParameters(exchange.Query)...)
-	parameters = append(parameters, cookieParameters(http.Header(exchange.Request.Headers))...)
-
-	bodyParameters, diagnostic := bodyParameters(exchange, limits)
-	parameters = append(parameters, bodyParameters...)
+	parameters, usedFields, limited := queryParameters(exchange.Query, limits.MaxFields)
+	diagnostic := ""
+	if limited {
+		diagnostic = diagnosticQueryFieldLimit
+	} else {
+		var cookieFields int
+		var cookieLimited bool
+		cookieParameters, cookieFields, cookieLimited := cookieParameters(http.Header(exchange.Request.Headers), limits.MaxFields-usedFields)
+		parameters = append(parameters, cookieParameters...)
+		usedFields += cookieFields
+		if cookieLimited {
+			diagnostic = diagnosticCookieFieldLimit
+		} else {
+			bodyLimits := limits
+			bodyLimits.MaxFields -= usedFields
+			bodyParameters, bodyDiagnostic := bodyParameters(exchange, bodyLimits)
+			parameters = append(parameters, bodyParameters...)
+			diagnostic = bodyDiagnostic
+		}
+	}
 	slices.SortFunc(parameters, compareParameter)
 	parameters = slices.CompactFunc(parameters, func(a, b store.TargetParameter) bool {
 		return compareParameter(a, b) == 0
@@ -152,19 +175,85 @@ func normalizeHost(value string) (string, error) {
 	return strings.ToLower(host), nil
 }
 
-func queryParameters(rawQuery string) []store.TargetParameter {
-	values, _ := url.ParseQuery(rawQuery)
-	return namedParameters("query", values)
+func queryParameters(rawQuery string, maxFields int) ([]store.TargetParameter, int, bool) {
+	parameters := make([]store.TargetParameter, 0, min(maxFields, strings.Count(rawQuery, "&")+1))
+	fields := 0
+	for rawQuery != "" {
+		if fields >= maxFields {
+			return parameters, fields, true
+		}
+		var field string
+		field, rawQuery, _ = strings.Cut(rawQuery, "&")
+		if field == "" {
+			continue
+		}
+		fields++
+		if strings.Contains(field, ";") {
+			continue
+		}
+		rawName, rawValue, _ := strings.Cut(field, "=")
+		name, err := url.QueryUnescape(rawName)
+		if err != nil || !validQueryEscapes(rawValue) {
+			continue
+		}
+		parameters = append(parameters, targetParameter("query", name, "string"))
+	}
+	return parameters, fields, false
 }
 
-func cookieParameters(headers http.Header) []store.TargetParameter {
-	request := &http.Request{Header: headers}
-	cookies := request.Cookies()
-	parameters := make([]store.TargetParameter, 0, len(cookies))
-	for _, cookie := range cookies {
-		parameters = append(parameters, targetParameter("cookie", cookie.Name, "string"))
+func cookieParameters(headers http.Header, maxFields int) ([]store.TargetParameter, int, bool) {
+	parameters := make([]store.TargetParameter, 0, min(maxFields, len(headers.Values("Cookie"))))
+	fields := 0
+	for _, line := range headers.Values("Cookie") {
+		line = textproto.TrimString(line)
+		for line != "" {
+			if fields >= maxFields {
+				return parameters, fields, true
+			}
+			var field string
+			field, line, _ = strings.Cut(line, ";")
+			field = textproto.TrimString(field)
+			if field == "" {
+				continue
+			}
+			fields++
+			name, value, _ := strings.Cut(field, "=")
+			name = textproto.TrimString(name)
+			if !httpguts.ValidHeaderFieldName(name) || !validCookieValue(value) {
+				continue
+			}
+			parameters = append(parameters, targetParameter("cookie", name, "string"))
+		}
 	}
-	return parameters
+	return parameters, fields, false
+}
+
+func validQueryEscapes(value string) bool {
+	for index := 0; index < len(value); index++ {
+		if value[index] == '%' {
+			if index+2 >= len(value) || !isHex(value[index+1]) || !isHex(value[index+2]) {
+				return false
+			}
+			index += 2
+		}
+	}
+	return true
+}
+
+func isHex(value byte) bool {
+	return '0' <= value && value <= '9' || 'a' <= value && value <= 'f' || 'A' <= value && value <= 'F'
+}
+
+func validCookieValue(value string) bool {
+	if len(value) > 1 && value[0] == '"' && value[len(value)-1] == '"' {
+		value = value[1 : len(value)-1]
+	}
+	for index := 0; index < len(value); index++ {
+		if value[index] < 0x20 || value[index] >= 0x7f || value[index] == '"' || value[index] == ';' || value[index] == '\\' {
+			return false
+		}
+	}
+	return true
 }
 
 func bodyParameters(exchange *store.Exchange, limits Limits) ([]store.TargetParameter, string) {
@@ -199,7 +288,7 @@ func bodyParameters(exchange *store.Exchange, limits Limits) ([]store.TargetPara
 	case "application/json":
 		return jsonParameters(exchange.Request.Body, limits)
 	case "multipart/form-data":
-		return multipartParameters(exchange.Request.Body, params["boundary"], limits.MaxMultipartFields)
+		return multipartParameters(exchange.Request.Body, params["boundary"], min(limits.MaxMultipartFields, limits.MaxFields))
 	default:
 		return nil, diagnosticBodyUnsupportedMIME
 	}
@@ -375,10 +464,26 @@ func hasMultipartClosingBoundary(body []byte, boundary string) bool {
 }
 
 func joinJSONPath(prefix, name string) string {
+	name = encodeJSONPathComponent(name)
 	if prefix == "" {
 		return name
 	}
 	return prefix + "." + name
+}
+
+func encodeJSONPathComponent(name string) string {
+	if !strings.ContainsAny(name, `\.[]`) {
+		return name
+	}
+	var encoded strings.Builder
+	encoded.Grow(len(name) + 1)
+	for index := 0; index < len(name); index++ {
+		if strings.ContainsRune(`\.[]`, rune(name[index])) {
+			encoded.WriteByte('\\')
+		}
+		encoded.WriteByte(name[index])
+	}
+	return encoded.String()
 }
 
 func arrayJSONPath(prefix string) string {

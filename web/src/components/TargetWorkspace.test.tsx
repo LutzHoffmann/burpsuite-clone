@@ -24,14 +24,14 @@ const tree: TargetTreeNode[] = [
     id: 0, scheme: 'https', host: 'example.test', port: 443, path: '', method: '', inScope: true, statuses: [200, 401, 404, 500], requestMimes: ['application/json', 'text/plain'], responseMimes: ['application/json', 'text/css', 'text/html'], count: 5, lastSeen: '2026-08-20T10:05:00Z', children: [
       { id: 0, scheme: '', host: '', port: 0, path: 'api', method: '', inScope: true, statuses: [200], requestMimes: ['application/json'], responseMimes: ['application/json'], count: 3, lastSeen: '2026-08-20T10:05:00Z', children: [
         { id: 0, scheme: '', host: '', port: 0, path: 'users', method: '', inScope: true, statuses: [200], requestMimes: ['application/json'], responseMimes: ['application/json'], count: 3, lastSeen: '2026-08-20T10:05:00Z', children: [
-          { id: 7, scheme: '', host: '', port: 0, path: '', method: 'GET', inScope: true, statuses: [200], requestMimes: ['application/json'], responseMimes: ['application/json'], count: 3, lastSeen: '2026-08-20T10:05:00Z', children: [] },
+          { id: 7, scheme: '', host: '', port: 0, path: '/api/users', method: 'GET', inScope: true, statuses: [200], requestMimes: ['application/json'], responseMimes: ['application/json'], count: 3, lastSeen: '2026-08-20T10:05:00Z', children: [] },
         ] },
       ] },
       { id: 0, scheme: '', host: '', port: 0, path: 'assets', method: '', inScope: false, statuses: [401, 404], requestMimes: ['text/plain'], responseMimes: ['text/css'], count: 1, lastSeen: '2026-08-20T10:04:00Z', children: [
-        { id: 8, scheme: '', host: '', port: 0, path: '', method: 'POST', inScope: false, statuses: [401, 404], requestMimes: ['text/plain'], responseMimes: ['text/css'], count: 1, lastSeen: '2026-08-20T10:04:00Z', children: [] },
+        { id: 8, scheme: '', host: '', port: 0, path: '/assets', method: 'POST', inScope: false, statuses: [401, 404], requestMimes: ['text/plain'], responseMimes: ['text/css'], count: 1, lastSeen: '2026-08-20T10:04:00Z', children: [] },
       ] },
       { id: 0, scheme: '', host: '', port: 0, path: 'admin', method: '', inScope: true, statuses: [500], requestMimes: ['application/json'], responseMimes: ['text/html'], count: 1, lastSeen: '2026-08-20T10:03:00Z', children: [
-        { id: 9, scheme: '', host: '', port: 0, path: '', method: 'DELETE', inScope: true, statuses: [500], requestMimes: ['application/json'], responseMimes: ['text/html'], count: 1, lastSeen: '2026-08-20T10:03:00Z', children: [] },
+        { id: 9, scheme: '', host: '', port: 0, path: '/admin', method: 'DELETE', inScope: true, statuses: [500], requestMimes: ['application/json'], responseMimes: ['text/html'], count: 1, lastSeen: '2026-08-20T10:03:00Z', children: [] },
       ] },
     ],
   },
@@ -39,7 +39,7 @@ const tree: TargetTreeNode[] = [
     id: 0, scheme: 'https', host: 'outside.test', port: 443, path: '', method: '', inScope: false, statuses: [201], requestMimes: ['application/json'], responseMimes: ['application/json'], count: 1, lastSeen: '2026-08-20T10:02:00Z', children: [
       { id: 0, scheme: '', host: '', port: 0, path: 'api', method: '', inScope: false, statuses: [201], requestMimes: ['application/json'], responseMimes: ['application/json'], count: 1, lastSeen: '2026-08-20T10:02:00Z', children: [
         { id: 0, scheme: '', host: '', port: 0, path: 'profile', method: '', inScope: false, statuses: [201], requestMimes: ['application/json'], responseMimes: ['application/json'], count: 1, lastSeen: '2026-08-20T10:02:00Z', children: [
-          { id: 10, scheme: '', host: '', port: 0, path: '', method: 'PATCH', inScope: false, statuses: [201], requestMimes: ['application/json'], responseMimes: ['application/json'], count: 1, lastSeen: '2026-08-20T10:02:00Z', children: [] },
+          { id: 10, scheme: '', host: '', port: 0, path: '/api/profile', method: 'PATCH', inScope: false, statuses: [201], requestMimes: ['application/json'], responseMimes: ['application/json'], count: 1, lastSeen: '2026-08-20T10:02:00Z', children: [] },
         ] },
       ] },
     ],
@@ -106,6 +106,27 @@ async function expandExampleUsers(user: ReturnType<typeof userEvent.setup>) {
 
 beforeEach(() => vi.stubGlobal('fetch', targetFetchFixture()));
 afterEach(() => vi.unstubAllGlobals());
+
+test('renders exact method paths including empty segments', async () => {
+  const leaf = (id: number, path: string): TargetTreeNode => ({
+    id, scheme: '', host: '', port: 0, path, method: 'GET', inScope: true,
+    statuses: [200], requestMimes: [], responseMimes: [], count: 1,
+    lastSeen: '2026-08-20T10:05:00Z', children: [],
+  });
+  const exactTree: TargetTreeNode[] = [{
+    id: 0, scheme: 'https', host: 'example.test', port: 443, path: '', method: '', inScope: true,
+    statuses: [200], requestMimes: [], responseMimes: [], count: 3,
+    lastSeen: '2026-08-20T10:05:00Z',
+    children: [leaf(21, '/api'), leaf(22, '/api/'), leaf(23, '/api//x')],
+  }];
+  const user = userEvent.setup();
+  render(<SiteMapTree nodes={exactTree} selectedId={null} filters={noFilters} onSelect={vi.fn()} />);
+
+  await user.click(screen.getByRole('treeitem', { name: /^example\.test:443/ }));
+  expect(screen.getByRole('treeitem', { name: 'GET /api' })).toBeInTheDocument();
+  expect(screen.getByRole('treeitem', { name: 'GET /api/' })).toBeInTheDocument();
+  expect(screen.getByRole('treeitem', { name: 'GET /api//x' })).toBeInTheDocument();
+});
 
 test('loads site-map parameter metadata without values and bounds diagnostics', async () => {
   render(<TargetWorkspace refresh={{ sequence: 0, type: 'initial' }} onOpenHistory={vi.fn()} onSendToRepeater={vi.fn()} />);
