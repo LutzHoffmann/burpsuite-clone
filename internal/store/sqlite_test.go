@@ -7,7 +7,9 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"sync"
 	"testing"
@@ -16,6 +18,28 @@ import (
 	"github.com/lutzifer/burpsuite-clone/internal/scope"
 	modernsqlite "modernc.org/sqlite"
 )
+
+func TestOpenSQLiteRestrictsExistingDatabasePermissions(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX permission bits are not meaningful for Windows ACLs")
+	}
+	dbPath := filepath.Join(t.TempDir(), "project.sqlite")
+	if err := os.WriteFile(dbPath, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	st, err := OpenSQLite(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	info, err := os.Stat(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Fatalf("database permissions = %o, want 600", got)
+	}
+}
 
 func openTestStore(t *testing.T) *SQLiteStore {
 	t.Helper()

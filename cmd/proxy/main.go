@@ -7,7 +7,6 @@ import (
 	"log"
 	"net"
 	"net/http"
-	"os"
 	"path/filepath"
 	"time"
 
@@ -25,7 +24,10 @@ import (
 
 func main() {
 	cfg := config.Load()
-	if err := os.MkdirAll(cfg.DataDir, 0o700); err != nil {
+	if err := config.ValidateLocalListeners(cfg); err != nil {
+		log.Fatal(err)
+	}
+	if err := config.EnsurePrivateDataDir(cfg.DataDir); err != nil {
 		log.Fatal(err)
 	}
 

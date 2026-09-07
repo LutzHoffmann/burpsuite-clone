@@ -1,9 +1,12 @@
 package config
 
 import (
+	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -38,6 +41,42 @@ func Load() Config {
 		}
 	}
 	return cfg
+}
+
+// ValidateLocalListeners prevents accidentally exposing the unauthenticated control plane or proxy.
+func ValidateLocalListeners(cfg Config) error {
+	for name, address := range map[string]string{"API": cfg.APIAddr, "proxy": cfg.ProxyAddr} {
+		host, port, err := net.SplitHostPort(address)
+		if err != nil || port == "" {
+			return fmt.Errorf("%s listener address %q is invalid", name, address)
+		}
+		ip := net.ParseIP(strings.Trim(host, "[]"))
+		if ip == nil || !ip.IsLoopback() {
+			return fmt.Errorf("%s listener %q must use a loopback IP address", name, address)
+		}
+	}
+	return nil
+}
+
+// EnsurePrivateDataDir creates the data directory and tightens permissions on existing directories.
+func EnsurePrivateDataDir(path string) error {
+	if strings.TrimSpace(path) == "" {
+		return fmt.Errorf("data directory is empty")
+	}
+	if err := os.MkdirAll(path, 0o700); err != nil {
+		return fmt.Errorf("create data directory: %w", err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return fmt.Errorf("inspect data directory: %w", err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("data directory %q is not a directory", path)
+	}
+	if err := os.Chmod(path, 0o700); err != nil {
+		return fmt.Errorf("restrict data directory permissions: %w", err)
+	}
+	return nil
 }
 
 func defaultDataDir() string {

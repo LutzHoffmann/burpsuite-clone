@@ -3,6 +3,7 @@ package scope
 import (
 	"fmt"
 	"net"
+	"path"
 	"strconv"
 	"strings"
 
@@ -159,14 +160,23 @@ func normalizeTarget(target Target) (normalizedTarget, bool) {
 	if err != nil {
 		return normalizedTarget{}, false
 	}
-	path := target.Path
-	if path == "" {
-		path = "/"
+	targetPath := target.Path
+	if targetPath == "" {
+		targetPath = "/"
 	}
-	if !strings.HasPrefix(path, "/") {
+	if !strings.HasPrefix(targetPath, "/") {
 		return normalizedTarget{}, false
 	}
-	return normalizedTarget{scheme: scheme, host: host, port: port, path: path}, true
+	targetPath = cleanTargetPath(targetPath)
+	return normalizedTarget{scheme: scheme, host: host, port: port, path: targetPath}, true
+}
+
+func cleanTargetPath(value string) string {
+	cleaned := path.Clean(value)
+	if strings.HasSuffix(value, "/") && cleaned != "/" {
+		cleaned += "/"
+	}
+	return cleaned
 }
 
 func splitHostPort(value, scheme string) (string, int, error) {

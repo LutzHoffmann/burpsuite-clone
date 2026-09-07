@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -18,6 +19,9 @@ type SQLiteStore struct {
 }
 
 func OpenSQLite(path string) (*SQLiteStore, error) {
+	if err := restrictSQLiteFiles(path); err != nil {
+		return nil, err
+	}
 	db, err := sql.Open("sqlite", sqliteDSN(path))
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite database: %w", err)
@@ -27,8 +31,21 @@ func OpenSQLite(path string) (*SQLiteStore, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("apply sqlite migrations: %w", err)
 	}
+	if err := restrictSQLiteFiles(path); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
 
 	return &SQLiteStore{db: db, bodyLimitBytes: config.Load().BodyLimitBytes}, nil
+}
+
+func restrictSQLiteFiles(path string) error {
+	for _, candidate := range []string{path, path + "-journal", path + "-shm", path + "-wal"} {
+		if err := os.Chmod(candidate, 0o600); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("restrict sqlite file permissions: %w", err)
+		}
+	}
+	return nil
 }
 
 func sqliteDSN(path string) string {

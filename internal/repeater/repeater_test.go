@@ -71,6 +71,20 @@ func TestSendCapturesTruncatedResponseMetadata(t *testing.T) {
 	}
 }
 
+func TestReadLimitedBodyStopsAfterDetectingTruncation(t *testing.T) {
+	reader := &countingInfiniteReader{}
+	body, size, truncated, err := readLimitedBody(reader, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(body) != "xxxx" || size != 5 || !truncated {
+		t.Fatalf("body = %q, size = %d, truncated = %t", body, size, truncated)
+	}
+	if reader.reads > 1 {
+		t.Fatalf("reader calls = %d, want at most 1", reader.reads)
+	}
+}
+
 func TestReadLimitedBodyPreservesBytesReturnedWithReadError(t *testing.T) {
 	readErr := errors.New("read failed")
 	body, size, truncated, err := readLimitedBody(&bytesThenErrorReader{data: []byte("response"), err: readErr}, 16)
@@ -116,3 +130,15 @@ func (r *bytesThenErrorReader) Read(p []byte) (int, error) {
 }
 
 var _ io.Reader = (*bytesThenErrorReader)(nil)
+
+type countingInfiniteReader struct {
+	reads int
+}
+
+func (r *countingInfiniteReader) Read(p []byte) (int, error) {
+	r.reads++
+	for i := range p {
+		p[i] = 'x'
+	}
+	return len(p), nil
+}

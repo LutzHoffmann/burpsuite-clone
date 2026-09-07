@@ -18,12 +18,15 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"golang.org/x/net/idna"
 )
 
 const (
-	caCertFile = "ca.pem"
-	caKeyFile  = "ca.key"
-	keyBits    = 2048
+	caCertFile     = "ca.pem"
+	caKeyFile      = "ca.key"
+	keyBits        = 2048
+	leafCacheLimit = 256
 )
 
 var errAuthorityKeyMismatch = errors.New("certificate authority certificate and key do not match")
@@ -34,8 +37,10 @@ type Authority struct {
 	cert    *x509.Certificate
 	key     *rsa.PrivateKey
 
-	mu    sync.Mutex
-	cache map[string]tls.Certificate
+	mu         sync.Mutex
+	cache      map[string]tls.Certificate
+	cacheOrder []string
+	cacheLimit int
 }
 
 // LoadOrCreateAuthority loads the CA from dir, creating it when it is absent.
@@ -185,7 +190,10 @@ func createAuthority() (*Authority, error) {
 		return nil, fmt.Errorf("parse certificate authority certificate: %w", err)
 	}
 	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
-	return &Authority{certPEM: certPEM, cert: cert, key: key, cache: make(map[string]tls.Certificate)}, nil
+	return &Authority{
+		certPEM: certPEM, cert: cert, key: key,
+		cache: make(map[string]tls.Certificate), cacheLimit: leafCacheLimit,
+	}, nil
 }
 
 func loadAuthority(certPEM, keyPEM []byte, keyPath string) (*Authority, error) {
@@ -215,7 +223,10 @@ func loadAuthority(certPEM, keyPEM []byte, keyPath string) (*Authority, error) {
 	if err := os.Chmod(keyPath, 0o600); err != nil {
 		return nil, fmt.Errorf("restrict certificate authority key permissions: %w", err)
 	}
-	return &Authority{certPEM: append([]byte(nil), certPEM...), cert: cert, key: key, cache: make(map[string]tls.Certificate)}, nil
+	return &Authority{
+		certPEM: append([]byte(nil), certPEM...), cert: cert, key: key,
+		cache: make(map[string]tls.Certificate), cacheLimit: leafCacheLimit,
+	}, nil
 }
 
 func pemBlockForKey(key *rsa.PrivateKey) ([]byte, error) {
@@ -244,16 +255,18 @@ func (a *Authority) CACertPEM() []byte {
 
 // CertificateForHost returns a cached leaf certificate signed by the local CA.
 func (a *Authority) CertificateForHost(host string) (tls.Certificate, error) {
-	host = strings.TrimSpace(host)
-	if host == "" {
-		return tls.Certificate{}, errors.New("certificate host is empty")
+	var err error
+	host, err = normalizeCertificateHost(host)
+	if err != nil {
+		return tls.Certificate{}, err
 	}
 
 	a.mu.Lock()
-	defer a.mu.Unlock()
 	if certificate, ok := a.cache[host]; ok {
+		a.mu.Unlock()
 		return cloneTLSCertificate(certificate), nil
 	}
+	a.mu.Unlock()
 
 	key, err := rsa.GenerateKey(rand.Reader, keyBits)
 	if err != nil {
@@ -283,8 +296,38 @@ func (a *Authority) CertificateForHost(host string) (tls.Certificate, error) {
 		return tls.Certificate{}, fmt.Errorf("create host certificate: %w", err)
 	}
 	certificate := tls.Certificate{Certificate: [][]byte{der, a.cert.Raw}, PrivateKey: key}
+
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if existing, ok := a.cache[host]; ok {
+		return cloneTLSCertificate(existing), nil
+	}
+	limit := a.cacheLimit
+	if limit <= 0 {
+		limit = leafCacheLimit
+	}
+	if len(a.cacheOrder) >= limit {
+		delete(a.cache, a.cacheOrder[0])
+		a.cacheOrder = a.cacheOrder[1:]
+	}
 	a.cache[host] = certificate
+	a.cacheOrder = append(a.cacheOrder, host)
 	return cloneTLSCertificate(certificate), nil
+}
+
+func normalizeCertificateHost(host string) (string, error) {
+	host = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(host)), ".")
+	if host == "" {
+		return "", errors.New("certificate host is empty")
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.String(), nil
+	}
+	ascii, err := idna.Lookup.ToASCII(host)
+	if err != nil || ascii == "" {
+		return "", errors.New("certificate host is invalid")
+	}
+	return strings.ToLower(ascii), nil
 }
 
 func cloneTLSCertificate(certificate tls.Certificate) tls.Certificate {

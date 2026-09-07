@@ -184,3 +184,32 @@ func TestCertificateForHostReturnsIndependentCachedBytes(t *testing.T) {
 		t.Fatalf("cached certificate was corrupted: %v", err)
 	}
 }
+
+func TestCertificateForHostUsesBoundedCanonicalCache(t *testing.T) {
+	a, err := LoadOrCreateAuthority(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.cacheLimit = 2
+
+	first, err := a.CertificateForHost("APP.EXAMPLE.TEST.")
+	if err != nil {
+		t.Fatal(err)
+	}
+	canonical, err := a.CertificateForHost("app.example.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(first.Certificate[0]) != string(canonical.Certificate[0]) {
+		t.Fatal("canonical host variants generated different certificates")
+	}
+	if _, err := a.CertificateForHost("second.example.test"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.CertificateForHost("third.example.test"); err != nil {
+		t.Fatal(err)
+	}
+	if got := len(a.cache); got != 2 {
+		t.Fatalf("cache size = %d, want 2", got)
+	}
+}

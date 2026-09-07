@@ -64,6 +64,21 @@ func TestRuleSetClassifyRequiresIncludeAndPathBoundary(t *testing.T) {
 	}
 }
 
+func TestRuleSetClassifyCanonicalizesDotSegmentsBeforeExclusions(t *testing.T) {
+	rules, err := Compile(1, []Rule{
+		{ID: 1, Enabled: true, Action: ActionInclude, HostPattern: "example.test", PathPrefix: "/allowed"},
+		{ID: 2, Enabled: true, Action: ActionExclude, HostPattern: "example.test", PathPrefix: "/private"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	decision := rules.Classify(Target{Scheme: "https", Host: "example.test", Path: "/allowed/../private/keys"})
+	if decision.InScope || decision.Reason != "excluded" || decision.RuleID == nil || *decision.RuleID != 2 {
+		t.Fatalf("decision = %+v, want exclusion rule 2", decision)
+	}
+}
+
 func TestRuleSetClassifyMatchesSupportedTargets(t *testing.T) {
 	tests := []struct {
 		name   string

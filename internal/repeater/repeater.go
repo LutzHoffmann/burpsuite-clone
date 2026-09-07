@@ -68,6 +68,10 @@ func (s *Service) Send(ctx context.Context, req SendRequest) (SendResult, error)
 	if err != nil {
 		return SendResult{}, fmt.Errorf("read repeater response: %w", err)
 	}
+	if response.ContentLength >= 0 {
+		size = response.ContentLength
+		truncated = size > int64(len(body))
+	}
 	return SendResult{
 		Status:      response.StatusCode,
 		Headers:     response.Header.Clone(),
@@ -80,27 +84,11 @@ func (s *Service) Send(ctx context.Context, req SendRequest) (SendResult, error)
 }
 
 func readLimitedBody(body io.Reader, limit int64) ([]byte, int64, bool, error) {
-	var captured bytes.Buffer
-	buffer := make([]byte, 32*1024)
-	var size int64
-	for {
-		n, err := body.Read(buffer)
-		if n > 0 {
-			size += int64(n)
-			remaining := limit - int64(captured.Len())
-			if remaining > 0 {
-				if int64(n) < remaining {
-					remaining = int64(n)
-				}
-				_, _ = captured.Write(buffer[:remaining])
-			}
-		}
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			return captured.Bytes(), size, size > limit, err
-		}
+	data, err := io.ReadAll(io.LimitReader(body, limit+1))
+	size := int64(len(data))
+	truncated := size > limit
+	if truncated {
+		data = data[:limit]
 	}
-	return captured.Bytes(), size, size > limit, nil
+	return data, size, truncated, err
 }
