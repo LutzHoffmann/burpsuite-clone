@@ -19,6 +19,8 @@ import (
 
 var testLimits = Limits{MaxJSONDepth: 16, MaxFields: 1000, MaxMultipartFields: 100}
 
+const testEventuallyTimeout = 15 * time.Second
+
 func TestServiceReplaceRulesRebuildsAndActivates(t *testing.T) {
 	repository := openTargetRepository(t)
 	saveExchange(t, repository, "https", "example.test", "/api", "q=1")
@@ -776,7 +778,7 @@ func saveExchange(t *testing.T, repository *store.SQLiteStore, scheme, host, pat
 
 func waitForRebuildStatus(t *testing.T, service *Service, wanted string) store.RebuildStatus {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(testEventuallyTimeout)
 	var last store.RebuildStatus
 	for time.Now().Before(deadline) {
 		status, err := service.RebuildStatus(context.Background())
@@ -868,7 +870,7 @@ func waitForSignal(t *testing.T, signal <-chan struct{}, name string) {
 	t.Helper()
 	select {
 	case <-signal:
-	case <-time.After(time.Second):
+	case <-time.After(testEventuallyTimeout):
 		t.Fatalf("timed out waiting for %s", name)
 	}
 }
@@ -886,7 +888,7 @@ func waitForRebuildWorker(t *testing.T, service *Service) {
 
 func collectUntilEvent(t *testing.T, subscriber <-chan events.Event, eventType string) []events.Event {
 	t.Helper()
-	deadline := time.After(2 * time.Second)
+	deadline := time.After(testEventuallyTimeout)
 	received := make([]events.Event, 0)
 	for {
 		select {

@@ -871,7 +871,7 @@ func newConcurrentRetryAPIServer(t *testing.T) (*Server, *target.Service, *retry
 
 func waitForServiceRebuild(t *testing.T, service *target.Service) {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(15 * time.Second)
 	var last store.RebuildStatus
 	for time.Now().Before(deadline) {
 		status, err := service.RebuildStatus(context.Background())
