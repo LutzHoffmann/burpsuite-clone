@@ -63,7 +63,7 @@ test('independent toggles and rule saves preserve all other configuration', asyn
   expect(writes[2]).toEqual({ ...writes[1], responseRules: [{ ...filter, statusCode: 404 }] });
   await waitFor(() => expect(responseToggle).toBeEnabled());
   fireEvent.click(screen.getByText('Match and replace'));
-  fireEvent.change(screen.getByLabelText('Replacement'), { target: { value: 'new' } });
+  fireEvent.change(await screen.findByLabelText('Replacement'), { target: { value: 'new' } });
   fireEvent.click(screen.getByRole('button', { name: 'Save replacements' }));
   await waitFor(() => expect(writes).toHaveLength(4));
   expect(writes[3]).toEqual({ ...writes[2], replacementRules: [{ ...initial.replacementRules![0], replacement: 'new' }] });
@@ -85,7 +85,7 @@ test('pending saves lock independent controls and keep replacement drafts across
   render(<App />);
   await waitFor(() => expect(screen.getByLabelText('Pause matching responses')).toBeEnabled());
   fireEvent.click(screen.getByText('Match and replace'));
-  fireEvent.change(screen.getByLabelText('Replacement'), { target: { value: 'unsaved' } });
+  fireEvent.change(await screen.findByLabelText('Replacement'), { target: { value: 'unsaved' } });
   let release!: () => void;
   state.holdSave = new Promise<void>((resolve) => { release = resolve; });
   fireEvent.click(screen.getByLabelText('Pause matching responses'));
