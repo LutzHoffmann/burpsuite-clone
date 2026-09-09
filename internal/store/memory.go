@@ -24,7 +24,9 @@ func (s *memoryStore) SaveExchange(_ context.Context, exchange *Exchange) error 
 
 	s.nextID++
 	exchange.ID = s.nextID
-	s.exchanges = append(s.exchanges, *exchange)
+	copy := *exchange
+	copy.AppliedRuleIDs = append([]string{}, exchange.AppliedRuleIDs...)
+	s.exchanges = append(s.exchanges, copy)
 	return nil
 }
 
@@ -39,23 +41,25 @@ func (s *memoryStore) ListHistory(_ context.Context, filter HistoryFilter) ([]Hi
 			continue
 		}
 		history = append(history, HistoryItem{
-			ID:           exchange.ID,
-			Method:       exchange.Method,
-			Scheme:       exchange.Scheme,
-			Host:         exchange.Host,
-			Path:         exchange.Path,
-			Query:        exchange.Query,
-			Status:       exchange.Status,
-			MIMEType:     exchange.MIMEType,
-			RequestSize:  exchange.RequestSize,
-			ResponseSize: exchange.ResponseSize,
-			DurationMS:   exchange.Duration.Milliseconds(),
-			StartedAt:    exchange.StartedAt,
-			Intercepted:  exchange.Intercepted,
-			Error:        exchange.Error,
-			InScope:      exchange.InScope,
-			ScopeVersion: exchange.ScopeVersion,
-			ScopeRuleID:  exchange.ScopeRuleID,
+			ResponseIntercepted: exchange.ResponseIntercepted,
+			AppliedRuleIDs:      append([]string{}, exchange.AppliedRuleIDs...),
+			ID:                  exchange.ID,
+			Method:              exchange.Method,
+			Scheme:              exchange.Scheme,
+			Host:                exchange.Host,
+			Path:                exchange.Path,
+			Query:               exchange.Query,
+			Status:              exchange.Status,
+			MIMEType:            exchange.MIMEType,
+			RequestSize:         exchange.RequestSize,
+			ResponseSize:        exchange.ResponseSize,
+			DurationMS:          exchange.Duration.Milliseconds(),
+			StartedAt:           exchange.StartedAt,
+			Intercepted:         exchange.Intercepted,
+			Error:               exchange.Error,
+			InScope:             exchange.InScope,
+			ScopeVersion:        exchange.ScopeVersion,
+			ScopeRuleID:         exchange.ScopeRuleID,
 		})
 	}
 	return history, nil
@@ -68,6 +72,7 @@ func (s *memoryStore) GetExchange(_ context.Context, id int64) (*Exchange, error
 	for _, exchange := range s.exchanges {
 		if exchange.ID == id {
 			copy := exchange
+			copy.AppliedRuleIDs = append([]string{}, exchange.AppliedRuleIDs...)
 			return &copy, nil
 		}
 	}

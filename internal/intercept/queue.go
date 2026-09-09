@@ -15,6 +15,8 @@ const (
 )
 
 type Item struct {
+	Phase         string              `json:"phase,omitempty"`
+	StatusCode    int                 `json:"statusCode,omitempty"`
 	ID            string              `json:"id"`
 	Method        string              `json:"method"`
 	URL           string              `json:"url"`
@@ -25,11 +27,12 @@ type Item struct {
 }
 
 type RequestEdit struct {
-	Method  string              `json:"method"`
-	URL     string              `json:"url"`
-	Headers map[string][]string `json:"headers"`
-	Body    []byte              `json:"body"`
-	BodySet bool                `json:"-"`
+	StatusCode int                 `json:"statusCode,omitempty"`
+	Method     string              `json:"method"`
+	URL        string              `json:"url"`
+	Headers    map[string][]string `json:"headers"`
+	Body       []byte              `json:"body"`
+	BodySet    bool                `json:"-"`
 }
 
 type Decision struct {
@@ -52,6 +55,9 @@ type Change struct {
 }
 
 func NewQueue(timeout time.Duration) *Queue {
+	if timeout <= 0 {
+		timeout = 2 * time.Minute
+	}
 	return &Queue{
 		items:   make(map[string]Item),
 		waiting: make(map[string]chan Decision),
@@ -60,14 +66,21 @@ func NewQueue(timeout time.Duration) *Queue {
 }
 
 func (q *Queue) Enqueue(ctx context.Context, item Item) (Decision, error) {
+	if err := ctx.Err(); err != nil {
+		return Decision{}, err
+	}
 	result := make(chan Decision, 1)
 
 	q.mu.Lock()
+	if len(q.items) >= 100 {
+		q.mu.Unlock()
+		return Decision{}, fmt.Errorf("intercept queue capacity reached")
+	}
 	if _, exists := q.items[item.ID]; exists {
 		q.mu.Unlock()
 		return Decision{}, fmt.Errorf("intercept item %q already queued", item.ID)
 	}
-	q.items[item.ID] = item
+	q.items[item.ID] = cloneItem(item)
 	q.waiting[item.ID] = result
 	observer := q.observer
 	q.mu.Unlock()
@@ -167,8 +180,9 @@ func (q *Queue) remove(id string, result chan Decision) bool {
 func cloneItem(item Item) Item {
 	item.Body = append([]byte(nil), item.Body...)
 	if item.Headers != nil {
+		original := item.Headers
 		item.Headers = make(map[string][]string, len(item.Headers))
-		for name, values := range item.Headers {
+		for name, values := range original {
 			item.Headers[name] = append([]string(nil), values...)
 		}
 	}

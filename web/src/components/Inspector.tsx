@@ -5,7 +5,7 @@ type InspectorProps = {
   exchange: Exchange | null;
 };
 
-const tabs = ['Headers', 'Body', 'Raw', 'Cookies', 'Query', 'Timing'] as const;
+const tabs = ['Headers', 'Body', 'Raw', 'Cookies', 'Query', 'Timing', 'Audit'] as const;
 type Tab = (typeof tabs)[number];
 
 function formatHeaders(headers: Record<string, string[]>) {
@@ -28,6 +28,7 @@ export function Inspector({ exchange }: InspectorProps) {
         Cookies: `Request\n${exchange.request.headers.Cookie?.join('\n') || 'No request cookies.'}\n\nResponse\n${exchange.response.headers['Set-Cookie']?.join('\n') || 'No response cookies.'}`,
         Query: exchange.query || 'No query parameters.',
         Timing: `Started: ${new Date(exchange.startedAt).toLocaleTimeString()}\nDuration: ${exchange.durationMs} ms`,
+        Audit: `Request intercepted: ${exchange.intercepted ? 'Yes' : 'No'}\nResponse intercepted: ${exchange.responseIntercepted ? 'Yes' : 'No'}\nApplied replacement rule IDs (in order):\n${exchange.appliedRuleIds?.join('\n') || 'None'}\n\nHistory shows final transmitted messages; before-images are not retained.${exchange.errorMessage ? `\nError: ${exchange.errorMessage}` : ''}`,
       }
     : null;
 

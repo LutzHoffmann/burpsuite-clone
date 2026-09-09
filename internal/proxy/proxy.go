@@ -12,8 +12,6 @@ import (
 	"mime"
 	"net"
 	"net/http"
-	"net/url"
-	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -54,14 +52,17 @@ type Server struct {
 }
 
 type preparedRequest struct {
-	forward       *http.Request
-	capture       *capturingReadCloser
-	headers       http.Header
-	intercepted   bool
-	dropped       bool
-	scopeRejected bool
-	droppedBody   []byte
-	decision      scope.Decision
+	appliedRuleIDs      []string
+	responseIntercepted bool
+	responseError       error
+	forward             *http.Request
+	capture             *capturingReadCloser
+	headers             http.Header
+	intercepted         bool
+	dropped             bool
+	scopeRejected       bool
+	droppedBody         []byte
+	decision            scope.Decision
 }
 
 func NewServer(cfg Config) *Server {
@@ -76,6 +77,7 @@ func NewServer(cfg Config) *Server {
 
 func defaultTransport(streamIdleTimeout time.Duration) *http.Transport {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.DisableCompression = true
 	dialer := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
 	transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
 		connection, err := dialer.DialContext(ctx, network, address)
@@ -138,6 +140,7 @@ func (s *Server) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "forward request", http.StatusBadGateway)
 		return
 	}
+	response = s.prepareResponse(prepared, response)
 	capturedResponse := newCapturingReadCloser(response.Body, s.cfg.BodyLimitBytes)
 	responseHeaders := response.Header.Clone()
 	clientHeaders := response.Header.Clone()
@@ -241,6 +244,7 @@ func (s *Server) forwardHTTPS(client net.Conn, request *http.Request) bool {
 		s.saveRoundTripFailure(prepared, startedAt, err)
 		return writeTunnelError(client, request, http.StatusBadGateway, "forward request")
 	}
+	response = s.prepareResponse(prepared, response)
 	capturedResponse := newCapturingReadCloser(response.Body, s.cfg.BodyLimitBytes)
 	responseHeaders := response.Header.Clone()
 	stripHopByHopHeaders(response.Header)
@@ -276,88 +280,6 @@ func classifyWithRules(rules *scope.RuleSet, request *http.Request) scope.Decisi
 	})
 }
 
-func (s *Server) prepareRequest(request *http.Request, captureDecision scope.Decision, captureRules *scope.RuleSet) (*preparedRequest, error) {
-	if !captureDecision.InScope || s.cfg.Intercept == nil || !s.cfg.Intercept.Matches(intercept.MatchRequest{
-		Method: request.Method,
-		Host:   request.URL.Host,
-		Path:   request.URL.Path,
-		MIME:   request.Header.Get("Content-Type"),
-	}) {
-		return prepareStreamingRequest(request, s.cfg.BodyLimitBytes, captureDecision), nil
-	}
-
-	body, tooLarge, err := readInterceptBody(request.Body, s.cfg.BodyLimitBytes)
-	if err != nil {
-		return nil, err
-	}
-	if tooLarge {
-		request.Body = &prefixReadCloser{Reader: io.MultiReader(bytes.NewReader(body), request.Body), closer: request.Body}
-		return prepareStreamingRequest(request, s.cfg.BodyLimitBytes, captureDecision), nil
-	}
-	_ = request.Body.Close()
-
-	item := intercept.Item{
-		ID:           strconv.FormatUint(s.nextID.Add(1), 10),
-		Method:       request.Method,
-		URL:          request.URL.String(),
-		Headers:      request.Header.Clone(),
-		Body:         body,
-		BodyEditable: isTextSafe(request.Header.Get("Content-Type"), body),
-	}
-	interceptDecision, err := s.cfg.Intercept.Queue().Enqueue(request.Context(), item)
-	if err != nil {
-		return nil, err
-	}
-	if interceptDecision.Action == intercept.ActionDrop {
-		return &preparedRequest{
-			headers: request.Header.Clone(), intercepted: true, dropped: true, droppedBody: body,
-			decision: captureDecision,
-		}, nil
-	}
-
-	method := interceptDecision.Edit.Method
-	if method == "" {
-		method = item.Method
-	}
-	rawURL := interceptDecision.Edit.URL
-	if rawURL == "" {
-		rawURL = item.URL
-	}
-	parsedURL, err := url.Parse(rawURL)
-	if err != nil || parsedURL.Scheme == "" || parsedURL.Host == "" {
-		return nil, fmt.Errorf("invalid intercepted request URL")
-	}
-	headers := interceptDecision.Edit.Headers
-	if headers == nil {
-		headers = item.Headers
-	}
-	editedBody := body
-	if item.BodyEditable && (interceptDecision.Edit.BodySet || interceptDecision.Edit.Body != nil) {
-		editedBody = interceptDecision.Edit.Body
-	}
-	forward := request.Clone(request.Context())
-	forward.Method = method
-	forward.URL = parsedURL
-	forward.Host = parsedURL.Host
-	forward.RequestURI = ""
-	forward.Header = cloneHeaders(headers)
-	capture := newCapturingReadCloser(io.NopCloser(bytes.NewReader(editedBody)), s.cfg.BodyLimitBytes)
-	forward.Body = capture
-	forward.ContentLength = int64(len(editedBody))
-	stripHopByHopHeaders(forward.Header)
-	editedDecision := classifyWithRules(captureRules, forward)
-	if !editedDecision.InScope {
-		return &preparedRequest{
-			forward: forward, capture: capture, headers: cloneHeaders(headers), intercepted: true,
-			scopeRejected: true, droppedBody: append([]byte(nil), editedBody...), decision: editedDecision,
-		}, nil
-	}
-	return &preparedRequest{
-		forward: forward, capture: capture, headers: cloneHeaders(headers), intercepted: true,
-		decision: editedDecision,
-	}, nil
-}
-
 func prepareStreamingRequest(request *http.Request, bodyLimit int64, decision scope.Decision) *preparedRequest {
 	capture := newCapturingReadCloser(request.Body, bodyLimit)
 	forward := request.Clone(request.Context())
@@ -365,7 +287,7 @@ func prepareStreamingRequest(request *http.Request, bodyLimit int64, decision sc
 	forward.Header = request.Header.Clone()
 	forward.Body = capture
 	stripHopByHopHeaders(forward.Header)
-	return &preparedRequest{forward: forward, capture: capture, headers: request.Header.Clone(), decision: decision}
+	return &preparedRequest{forward: forward, capture: capture, headers: forward.Header.Clone(), decision: decision}
 }
 
 func readInterceptBody(body io.ReadCloser, limit int64) ([]byte, bool, error) {
@@ -383,6 +305,7 @@ func readInterceptBody(body io.ReadCloser, limit int64) ([]byte, bool, error) {
 }
 
 func (s *Server) saveCompletedExchange(prepared *preparedRequest, response *http.Response, responseHeaders http.Header, capturedResponse *capturingReadCloser, startedAt time.Time, operationErr error) {
+	operationErr = errors.Join(operationErr, prepared.responseError)
 	requestBody, requestTruncated := prepared.capture.Captured()
 	responseBody, responseTruncated := capturedResponse.Captured()
 	exchange := s.exchangeFromPrepared(prepared, startedAt)
@@ -423,11 +346,15 @@ func (s *Server) savePreparationFailure(request *http.Request, decision scope.De
 }
 
 func (s *Server) saveDroppedExchange(request *http.Request, prepared *preparedRequest, startedAt time.Time) {
+	if prepared.forward != nil {
+		request = prepared.forward
+	}
 	s.saveExchange(&store.Exchange{
 		Method: request.Method, Scheme: request.URL.Scheme, Host: request.URL.Host,
 		Path: request.URL.Path, Query: request.URL.RawQuery, Duration: time.Since(startedAt),
 		StartedAt: startedAt, Intercepted: true, Error: true, ErrorMessage: "request dropped by operator",
-		InScope: prepared.decision.InScope, ScopeVersion: prepared.decision.Version, ScopeRuleID: prepared.decision.RuleID,
+		AppliedRuleIDs: append([]string(nil), prepared.appliedRuleIDs...),
+		InScope:        prepared.decision.InScope, ScopeVersion: prepared.decision.Version, ScopeRuleID: prepared.decision.RuleID,
 		RequestSize: int64(len(prepared.droppedBody)),
 		Request:     store.RequestData{Headers: prepared.headers, Body: append([]byte(nil), prepared.droppedBody...)},
 	})
@@ -448,6 +375,7 @@ func (s *Server) exchangeFromPrepared(prepared *preparedRequest, startedAt time.
 		Method: request.Method, Scheme: request.URL.Scheme, Host: request.URL.Host,
 		Path: request.URL.Path, Query: request.URL.RawQuery, Duration: time.Since(startedAt),
 		StartedAt: startedAt, Intercepted: prepared.intercepted,
+		AppliedRuleIDs: append([]string(nil), prepared.appliedRuleIDs...), ResponseIntercepted: prepared.responseIntercepted,
 		InScope: prepared.decision.InScope, ScopeVersion: prepared.decision.Version, ScopeRuleID: prepared.decision.RuleID,
 		Request: store.RequestData{Headers: prepared.headers},
 	}

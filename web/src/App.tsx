@@ -4,6 +4,9 @@ import {
   ApiError,
   dropIntercept as dropInterceptAPI,
   forwardIntercept as forwardInterceptAPI,
+  forwardResponse as forwardResponseAPI,
+  dropResponse as dropResponseAPI,
+  getResponseQueue,
   getExchange,
   getHistory,
   getInterceptConfig,
@@ -17,6 +20,7 @@ import {
 import { connectEvents } from './api/events';
 import { HistoryTable } from './components/HistoryTable';
 import { InterceptPanel } from './components/InterceptPanel';
+import { InterceptRules, matchAllRule } from './components/InterceptRules';
 import { Inspector } from './components/Inspector';
 import { Repeater } from './components/Repeater';
 import { Settings } from './components/Settings';
@@ -138,6 +142,12 @@ export function App() {
   const [exchange, setExchange] = useState<Exchange | null>(null);
   const [interceptItems, setInterceptItems] = useState<InterceptItem[]>([]);
   const [interceptConfig, setInterceptConfig] = useState<InterceptConfig>({ enabled: false, rules: [] });
+  const [responseItems, setResponseItems] = useState<InterceptItem[]>([]);
+  const [configReady, setConfigReady] = useState(false);
+  const [configSaving, setConfigSaving] = useState(false);
+  const configRef = useRef(interceptConfig);
+  const configPending = useRef(false);
+  const configRevision = useRef(0);
   const [repeaterRequest, setRepeaterRequest] = useState<SendRequest>(emptyRepeaterRequest);
   const [repeaterResult, setRepeaterResult] = useState<SendResult | null>(null);
   const [apiErrors, setAPIErrors] = useState<Record<string, string | undefined>>({});
@@ -189,22 +199,43 @@ export function App() {
       } catch (error) {
         recordError('intercept', 'Intercept unavailable', error);
       }
+    };
+    const loadConfig = async () => {
+      const revision = configRevision.current;
       try {
         const config = await getInterceptConfig();
-        if (active) setInterceptConfig(config);
+        if (active && !configPending.current && revision === configRevision.current) {
+          configRef.current = config;
+          setInterceptConfig(config);
+          setConfigReady(true);
+          clearError('interceptConfig');
+        }
       } catch (error) {
         recordError('interceptConfig', 'Intercept setting unavailable', error);
+      }
+    };
+    const loadResponses = async () => {
+      try {
+        const queue = await getResponseQueue();
+        if (active) setResponseItems(queue ?? []);
+        clearError('responses');
+      } catch (error) {
+        recordError('responses', 'Response queue unavailable', error);
       }
     };
 
     void loadStatus();
     void loadHistory();
     void loadIntercept();
+    void loadConfig();
+    void loadResponses();
     const disconnect = connectEvents((event) => {
       const eventType = event.type;
       if (eventType === 'history.entry.created' || eventType === 'history.entry.updated') void loadHistory();
       if (eventType === 'proxy.status.changed') void loadStatus();
       if (eventType.startsWith('intercept.item.') || eventType === 'settings.changed') void loadIntercept();
+      if (eventType.startsWith('intercept.response.') || eventType === 'settings.changed') void loadResponses();
+      if (eventType === 'settings.changed') void loadConfig();
       if (isTargetRefreshType(eventType)) setTargetRefresh((refresh) => ({ sequence: refresh.sequence + 1, type: eventType }));
     });
     return () => {
@@ -240,6 +271,7 @@ export function App() {
     try {
       await forwardInterceptAPI(item.id, item);
       await loadInterceptQueue();
+      setAPIErrors((errors) => ({ ...errors, intercept: undefined }));
     } catch (error) {
       setAPIErrors((errors) => ({ ...errors, intercept: `Forward failed: ${error instanceof Error ? error.message : 'request failed'}` }));
     }
@@ -249,17 +281,43 @@ export function App() {
     try {
       await dropInterceptAPI(id);
       await loadInterceptQueue();
+      setAPIErrors((errors) => ({ ...errors, intercept: undefined }));
     } catch (error) {
       setAPIErrors((errors) => ({ ...errors, intercept: `Drop failed: ${error instanceof Error ? error.message : 'request failed'}` }));
     }
   };
 
-  const toggleIntercept = async (enabled: boolean) => {
+  const saveIntercept = async (patch: Partial<InterceptConfig>) => {
+    if (configPending.current || !configReady) return;
+    configPending.current = true;
+    configRevision.current += 1;
+    setConfigSaving(true);
     try {
-      const next = await updateInterceptConfig({ ...interceptConfig, enabled });
+      const current = configRef.current;
+      const merged = { ...current, responseEnabled: current.responseEnabled ?? false,
+        responseRules: current.responseRules ?? [matchAllRule()], replacementRules: current.replacementRules ?? [], ...patch };
+      const saved = await updateInterceptConfig(merged);
+      const next = { ...merged, ...saved };
+      configRef.current = next;
       setInterceptConfig(next);
+      setAPIErrors((errors) => ({ ...errors, interceptConfig: undefined }));
     } catch (error) {
-      setAPIErrors((errors) => ({ ...errors, intercept: `Intercept setting failed: ${error instanceof Error ? error.message : 'request failed'}` }));
+      setAPIErrors((errors) => ({ ...errors, interceptConfig: `Intercept setting failed: ${error instanceof Error ? error.message : 'request failed'}` }));
+    } finally {
+      configPending.current = false;
+      configRevision.current += 1;
+      setConfigSaving(false);
+    }
+  };
+
+  const actOnResponse = async (item: InterceptItem | string) => {
+    try {
+      if (typeof item === 'string') await dropResponseAPI(item);
+      else await forwardResponseAPI(item);
+      setResponseItems(await getResponseQueue());
+      setAPIErrors((errors) => ({ ...errors, responses: undefined }));
+    } catch (error) {
+      setAPIErrors((errors) => ({ ...errors, responses: `Response ${typeof item === 'string' ? 'drop' : 'forward'} failed: ${error instanceof Error ? error.message : 'request failed'}` }));
     }
   };
 
@@ -376,10 +434,15 @@ export function App() {
           <InterceptPanel
             enabled={interceptConfig.enabled}
             items={interceptItems}
-            onEnabledChange={(enabled) => void toggleIntercept(enabled)}
-            onForward={(item) => void forwardIntercept(item)}
-            onDrop={(id) => void dropIntercept(id)}
+            disabled={!configReady || configSaving}
+            onEnabledChange={(enabled) => void saveIntercept({ enabled })}
+            onForward={forwardIntercept}
+            onDrop={dropIntercept}
           />
+          <InterceptPanel phase="response" enabled={interceptConfig.responseEnabled ?? false} items={responseItems}
+            disabled={!configReady || configSaving} onEnabledChange={(responseEnabled) => void saveIntercept({ responseEnabled })}
+            onForward={actOnResponse} onDrop={actOnResponse} />
+          <InterceptRules config={interceptConfig} disabled={!configReady || configSaving} onSave={(patch) => void saveIntercept(patch)} />
           <Repeater initialRequest={repeaterRequest} result={repeaterResult} onSend={(request) => void sendRepeater(request)} />
         </section></>}
       </div>

@@ -10,7 +10,8 @@ export class ApiError extends Error {
 const api = async <T>(path: string, init?: RequestInit): Promise<T> => {
   const response = await fetch(path, init);
   if (!response.ok) {
-    throw new ApiError(response.status, response.statusText);
+    const detail = await response.text().catch(() => '');
+    throw new ApiError(response.status, detail.trim() || response.statusText);
   }
   if (response.status === 204) {
     return undefined as T;
@@ -36,6 +37,16 @@ export const sendRepeater = (id: string, request: SendRequest) =>
   api<SendResult>(`/api/repeater/sessions/${id}/send`, jsonRequest('POST', request));
 
 export const getInterceptQueue = () => api<InterceptItem[]>('/api/intercept/queue');
+
+export const getResponseQueue = () => api<InterceptItem[]>('/api/intercept/response-queue');
+
+export const forwardResponse = (item: InterceptItem) =>
+  api<void>(`/api/intercept/response/${encodeURIComponent(item.id)}/forward`, jsonRequest('POST', {
+    statusCode: item.statusCode, headers: item.headers, body: item.body,
+  }));
+
+export const dropResponse = (id: string) =>
+  api<void>(`/api/intercept/response/${encodeURIComponent(id)}/drop`, jsonRequest('POST', {}));
 
 export const getInterceptConfig = () => api<InterceptConfig>('/api/intercept/config');
 

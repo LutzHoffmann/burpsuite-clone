@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sync"
 
 	"github.com/lutzifer/burpsuite-clone/internal/certs"
 	"github.com/lutzifer/burpsuite-clone/internal/events"
@@ -26,8 +27,9 @@ type Config struct {
 }
 
 type Server struct {
-	cfg Config
-	mux *http.ServeMux
+	cfg               Config
+	mux               *http.ServeMux
+	interceptConfigMu sync.Mutex
 }
 
 func NewServer(cfg Config) *Server {
@@ -49,6 +51,9 @@ func NewServer(cfg Config) *Server {
 	srv.mux.HandleFunc("PUT /api/intercept/config", srv.handleInterceptConfigUpdate)
 	srv.mux.HandleFunc("POST /api/intercept/{id}/forward", srv.handleInterceptForward)
 	srv.mux.HandleFunc("POST /api/intercept/{id}/drop", srv.handleInterceptDrop)
+	srv.mux.HandleFunc("GET /api/intercept/response-queue", srv.handleResponseQueue)
+	srv.mux.HandleFunc("POST /api/intercept/response/{id}/forward", srv.handleResponseForward)
+	srv.mux.HandleFunc("POST /api/intercept/response/{id}/drop", srv.handleResponseDrop)
 	srv.mux.HandleFunc("GET /api/repeater/sessions", srv.handleRepeaterSessions)
 	srv.mux.HandleFunc("GET /api/repeater/sessions/{id}/history", srv.handleRepeaterHistory)
 	srv.mux.HandleFunc("GET /api/repeater/sessions/{id}/compare", srv.handleRepeaterCompare)
@@ -66,6 +71,13 @@ func NewServer(cfg Config) *Server {
 		cfg.Intercept.Queue().SetObserver(func(change intercept.Change) {
 			eventType := "intercept.item." + change.Type
 			cfg.Events.Publish(events.Event{Type: eventType, Data: map[string]interface{}{
+				"id": change.Item.ID, "action": change.Action,
+			}})
+		})
+		// Response lifecycle events are intercept.response.queued and
+		// intercept.response.completed; request events retain intercept.item.*.
+		cfg.Intercept.ResponseQueue().SetObserver(func(change intercept.Change) {
+			cfg.Events.Publish(events.Event{Type: "intercept.response." + change.Type, Data: map[string]interface{}{
 				"id": change.Item.ID, "action": change.Action,
 			}})
 		})

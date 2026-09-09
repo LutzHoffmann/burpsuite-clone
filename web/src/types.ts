@@ -36,6 +36,8 @@ export interface MessageDetail {
 }
 
 export interface Exchange extends HistoryItem {
+  appliedRuleIds?: string[];
+  responseIntercepted?: boolean;
   errorMessage: string;
   requestTruncated: boolean;
   responseTruncated: boolean;
@@ -64,6 +66,8 @@ export interface SendResult {
 }
 
 export interface InterceptItem {
+  phase?: 'request' | 'response';
+  statusCode?: number;
   id: string;
   method: string;
   url: string;
@@ -74,6 +78,7 @@ export interface InterceptItem {
 }
 
 export interface InterceptRule {
+  statusCode?: number;
   enabled: boolean;
   method: string;
   hostContains: string;
@@ -84,6 +89,23 @@ export interface InterceptRule {
 export interface InterceptConfig {
   enabled: boolean;
   rules: InterceptRule[];
+  responseEnabled?: boolean;
+  responseRules?: InterceptRule[];
+  replacementRules?: ReplacementRule[];
+}
+
+export interface ReplacementRule {
+  id: string;
+  enabled: boolean;
+  direction: 'request' | 'response';
+  target: 'url' | 'header' | 'body';
+  header: string;
+  pattern: string;
+  replacement: string;
+  regex: boolean;
+  hostContains: string;
+  pathContains: string;
+  mimeContains: string;
 }
 
 export type ScopeAction = 'include' | 'exclude';

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net"
 	"net/http"
@@ -59,18 +60,10 @@ func main() {
 		log.Fatal(err)
 	}
 	queue := intercept.NewQueue(cfg.InterceptTimeout)
-	interceptState := intercept.ControllerState{
-		Enabled: false,
-		Rules:   []intercept.Rule{{Enabled: true}},
-	}
-	if saved, err := history.GetSetting(context.Background(), "intercept.config"); err == nil {
-		if err := json.Unmarshal([]byte(saved), &interceptState); err != nil {
-			log.Printf("load intercept config: %v", err)
-		}
-	} else if err != sql.ErrNoRows {
+	interceptController := intercept.NewController(queue, false, []intercept.Rule{{Enabled: true}})
+	if err := restoreInterceptConfig(context.Background(), history, interceptController); err != nil {
 		log.Printf("load intercept config: %v", err)
 	}
-	interceptController := intercept.NewController(queue, interceptState.Enabled, interceptState.Rules)
 
 	proxyListener, err := net.Listen("tcp", cfg.ProxyAddr)
 	if err != nil {
@@ -111,4 +104,26 @@ func main() {
 	if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatal(err)
 	}
+}
+
+func restoreInterceptConfig(ctx context.Context, settings interface {
+	GetSetting(context.Context, string) (string, error)
+}, controller *intercept.Controller) error {
+	saved, err := settings.GetSetting(ctx, "intercept.config")
+	if err == sql.ErrNoRows {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	// Decode into defaults so older request-only settings keep response defaults.
+	state := controller.State()
+	if err := json.Unmarshal([]byte(saved), &state); err != nil {
+		return fmt.Errorf("decode: %w", err)
+	}
+	if err := intercept.ValidateState(state); err != nil {
+		return fmt.Errorf("validate: %w", err)
+	}
+	controller.Update(state)
+	return nil
 }

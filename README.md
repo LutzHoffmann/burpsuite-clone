@@ -4,7 +4,12 @@ Local proxy-first web application for authorized web application security testin
 
 ## Scope
 
-v1 focuses on HTTP/HTTPS proxying, interception, history, inspection, Repeater, and local project storage.
+The application provides HTTP/HTTPS proxying, independent request and response interception,
+ordered regex/literal replacements, history, inspection, Repeater, Target Scope,
+Site Map, and local project storage.
+
+See [Response interception and replacement rules](docs/setup/response-intercept.md)
+for the v2b workflow, examples, and body-editing limits.
 
 ## Safety
 

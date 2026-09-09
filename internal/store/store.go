@@ -8,30 +8,32 @@ import (
 )
 
 type Exchange struct {
-	ID                int64
-	Method            string
-	Scheme            string
-	Host              string
-	Path              string
-	Query             string
-	Status            int
-	MIMEType          string
-	RequestSize       int64
-	ResponseSize      int64
-	Duration          time.Duration
-	StartedAt         time.Time
-	Intercepted       bool
-	Error             bool
-	ErrorMessage      string
-	RequestTruncated  bool
-	ResponseTruncated bool
-	InScope           bool
-	ScopeVersion      int64
-	ScopeRuleID       *int64
-	Request           RequestData
-	Response          ResponseData
-	Tags              []string
-	Note              string
+	ID                  int64
+	Method              string
+	Scheme              string
+	Host                string
+	Path                string
+	Query               string
+	Status              int
+	MIMEType            string
+	RequestSize         int64
+	ResponseSize        int64
+	Duration            time.Duration
+	StartedAt           time.Time
+	Intercepted         bool
+	ResponseIntercepted bool
+	AppliedRuleIDs      []string
+	Error               bool
+	ErrorMessage        string
+	RequestTruncated    bool
+	ResponseTruncated   bool
+	InScope             bool
+	ScopeVersion        int64
+	ScopeRuleID         *int64
+	Request             RequestData
+	Response            ResponseData
+	Tags                []string
+	Note                string
 }
 
 type RequestData struct {
@@ -76,23 +78,25 @@ type RebuildStatus struct {
 }
 
 type HistoryItem struct {
-	ID           int64     `json:"id"`
-	Method       string    `json:"method"`
-	Scheme       string    `json:"scheme"`
-	Host         string    `json:"host"`
-	Path         string    `json:"path"`
-	Query        string    `json:"query"`
-	Status       int       `json:"status"`
-	MIMEType     string    `json:"mimeType"`
-	RequestSize  int64     `json:"requestSize"`
-	ResponseSize int64     `json:"responseSize"`
-	DurationMS   int64     `json:"durationMs"`
-	StartedAt    time.Time `json:"startedAt"`
-	Intercepted  bool      `json:"intercepted"`
-	Error        bool      `json:"error"`
-	InScope      bool      `json:"inScope"`
-	ScopeVersion int64     `json:"scopeVersion"`
-	ScopeRuleID  *int64    `json:"scopeRuleId"`
+	ResponseIntercepted bool      `json:"responseIntercepted"`
+	AppliedRuleIDs      []string  `json:"appliedRuleIds"`
+	ID                  int64     `json:"id"`
+	Method              string    `json:"method"`
+	Scheme              string    `json:"scheme"`
+	Host                string    `json:"host"`
+	Path                string    `json:"path"`
+	Query               string    `json:"query"`
+	Status              int       `json:"status"`
+	MIMEType            string    `json:"mimeType"`
+	RequestSize         int64     `json:"requestSize"`
+	ResponseSize        int64     `json:"responseSize"`
+	DurationMS          int64     `json:"durationMs"`
+	StartedAt           time.Time `json:"startedAt"`
+	Intercepted         bool      `json:"intercepted"`
+	Error               bool      `json:"error"`
+	InScope             bool      `json:"inScope"`
+	ScopeVersion        int64     `json:"scopeVersion"`
+	ScopeRuleID         *int64    `json:"scopeRuleId"`
 }
 
 type HistoryFilter struct {

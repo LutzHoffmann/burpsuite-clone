@@ -3,6 +3,7 @@ package proxy
 import (
 	"bytes"
 	"io"
+	"net/http"
 )
 
 func readLimitedBody(body io.ReadCloser, limit int64) ([]byte, bool, error) {
@@ -27,6 +28,9 @@ type capturingReadCloser struct {
 }
 
 func newCapturingReadCloser(body io.ReadCloser, limit int64) *capturingReadCloser {
+	if body == nil {
+		body = http.NoBody
+	}
 	if limit < 0 {
 		limit = 0
 	}

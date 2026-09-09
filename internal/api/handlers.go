@@ -30,50 +30,54 @@ type messageDTO struct {
 }
 
 type exchangeDTO struct {
-	ID                int64      `json:"id"`
-	Method            string     `json:"method"`
-	Scheme            string     `json:"scheme"`
-	Host              string     `json:"host"`
-	Path              string     `json:"path"`
-	Query             string     `json:"query"`
-	Status            int        `json:"status"`
-	MIMEType          string     `json:"mimeType"`
-	RequestSize       int64      `json:"requestSize"`
-	ResponseSize      int64      `json:"responseSize"`
-	DurationMS        int64      `json:"durationMs"`
-	StartedAt         time.Time  `json:"startedAt"`
-	Intercepted       bool       `json:"intercepted"`
-	Error             bool       `json:"error"`
-	ErrorMessage      string     `json:"errorMessage"`
-	RequestTruncated  bool       `json:"requestTruncated"`
-	ResponseTruncated bool       `json:"responseTruncated"`
-	InScope           bool       `json:"inScope"`
-	ScopeVersion      int64      `json:"scopeVersion"`
-	ScopeRuleID       *int64     `json:"scopeRuleId"`
-	Request           messageDTO `json:"request"`
-	Response          messageDTO `json:"response"`
-	Tags              []string   `json:"tags"`
-	Note              string     `json:"note"`
+	ID                  int64      `json:"id"`
+	Method              string     `json:"method"`
+	Scheme              string     `json:"scheme"`
+	Host                string     `json:"host"`
+	Path                string     `json:"path"`
+	Query               string     `json:"query"`
+	Status              int        `json:"status"`
+	MIMEType            string     `json:"mimeType"`
+	RequestSize         int64      `json:"requestSize"`
+	ResponseSize        int64      `json:"responseSize"`
+	DurationMS          int64      `json:"durationMs"`
+	StartedAt           time.Time  `json:"startedAt"`
+	Intercepted         bool       `json:"intercepted"`
+	ResponseIntercepted bool       `json:"responseIntercepted"`
+	AppliedRuleIDs      []string   `json:"appliedRuleIds"`
+	Error               bool       `json:"error"`
+	ErrorMessage        string     `json:"errorMessage"`
+	RequestTruncated    bool       `json:"requestTruncated"`
+	ResponseTruncated   bool       `json:"responseTruncated"`
+	InScope             bool       `json:"inScope"`
+	ScopeVersion        int64      `json:"scopeVersion"`
+	ScopeRuleID         *int64     `json:"scopeRuleId"`
+	Request             messageDTO `json:"request"`
+	Response            messageDTO `json:"response"`
+	Tags                []string   `json:"tags"`
+	Note                string     `json:"note"`
 }
 
 type historyItemDTO struct {
-	ID           int64     `json:"id"`
-	Method       string    `json:"method"`
-	Scheme       string    `json:"scheme"`
-	Host         string    `json:"host"`
-	Path         string    `json:"path"`
-	Query        string    `json:"query"`
-	Status       int       `json:"status"`
-	MIMEType     string    `json:"mimeType"`
-	RequestSize  int64     `json:"requestSize"`
-	ResponseSize int64     `json:"responseSize"`
-	DurationMS   int64     `json:"durationMs"`
-	StartedAt    time.Time `json:"startedAt"`
-	Intercepted  bool      `json:"intercepted"`
-	Error        bool      `json:"error"`
-	InScope      bool      `json:"inScope"`
-	ScopeVersion int64     `json:"scopeVersion"`
-	ScopeRuleID  *int64    `json:"scopeRuleId"`
+	ResponseIntercepted bool      `json:"responseIntercepted"`
+	AppliedRuleIDs      []string  `json:"appliedRuleIds"`
+	ID                  int64     `json:"id"`
+	Method              string    `json:"method"`
+	Scheme              string    `json:"scheme"`
+	Host                string    `json:"host"`
+	Path                string    `json:"path"`
+	Query               string    `json:"query"`
+	Status              int       `json:"status"`
+	MIMEType            string    `json:"mimeType"`
+	RequestSize         int64     `json:"requestSize"`
+	ResponseSize        int64     `json:"responseSize"`
+	DurationMS          int64     `json:"durationMs"`
+	StartedAt           time.Time `json:"startedAt"`
+	Intercepted         bool      `json:"intercepted"`
+	Error               bool      `json:"error"`
+	InScope             bool      `json:"inScope"`
+	ScopeVersion        int64     `json:"scopeVersion"`
+	ScopeRuleID         *int64    `json:"scopeRuleId"`
 }
 
 type repeaterAPIRequest struct {
@@ -95,6 +99,8 @@ type repeaterAPIResponse struct {
 }
 
 type interceptItemDTO struct {
+	Phase         string              `json:"phase,omitempty"`
+	StatusCode    int                 `json:"statusCode,omitempty"`
 	ID            string              `json:"id"`
 	Method        string              `json:"method"`
 	URL           string              `json:"url"`
@@ -258,6 +264,8 @@ func (s *Server) handleInterceptQueue(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (s *Server) handleInterceptConfig(w http.ResponseWriter, _ *http.Request) {
+	s.interceptConfigMu.Lock()
+	defer s.interceptConfigMu.Unlock()
 	if s.cfg.Intercept == nil {
 		writeJSON(w, http.StatusOK, intercept.ControllerState{})
 		return
@@ -270,11 +278,20 @@ func (s *Server) handleInterceptConfigUpdate(w http.ResponseWriter, r *http.Requ
 		http.Error(w, "intercept unavailable", http.StatusServiceUnavailable)
 		return
 	}
-	var state intercept.ControllerState
+	var state *intercept.ControllerState
 	if err := s.decodeJSON(w, r, &state); err != nil {
 		return
 	}
-	s.cfg.Intercept.Update(state)
+	if state == nil {
+		http.Error(w, "config must be an object", http.StatusBadRequest)
+		return
+	}
+	if err := intercept.ValidateState(*state); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	s.interceptConfigMu.Lock()
+	defer s.interceptConfigMu.Unlock()
 	if projectStore, ok := s.cfg.Store.(store.ProjectStore); ok {
 		encoded, _ := json.Marshal(state)
 		if err := projectStore.SetSetting(r.Context(), "intercept.config", string(encoded)); err != nil {
@@ -282,6 +299,7 @@ func (s *Server) handleInterceptConfigUpdate(w http.ResponseWriter, r *http.Requ
 			return
 		}
 	}
+	s.cfg.Intercept.Update(*state)
 	s.cfg.Events.Publish(events.Event{Type: "settings.changed", Data: state})
 	writeJSON(w, http.StatusOK, state)
 }
@@ -296,6 +314,10 @@ func (s *Server) handleInterceptForward(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "intercept item not found", http.StatusNotFound)
 		return
 	}
+	if item.Phase == "response" {
+		http.Error(w, "response item requires response endpoint", http.StatusBadRequest)
+		return
+	}
 	var edit interceptItemDTO
 	if err := s.decodeJSON(w, r, &edit); err != nil {
 		return
@@ -304,7 +326,7 @@ func (s *Server) handleInterceptForward(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "binary request body is not editable", http.StatusBadRequest)
 		return
 	}
-	body := item.Body
+	var body []byte
 	bodySet := false
 	if item.BodyEditable {
 		body = []byte(edit.Body)
@@ -450,6 +472,7 @@ func toExchangeDTO(exchange *store.Exchange) exchangeDTO {
 		RequestSize: exchange.RequestSize, ResponseSize: exchange.ResponseSize,
 		DurationMS: exchange.Duration.Milliseconds(), StartedAt: exchange.StartedAt,
 		Intercepted: exchange.Intercepted, Error: exchange.Error, ErrorMessage: exchange.ErrorMessage,
+		ResponseIntercepted: exchange.ResponseIntercepted, AppliedRuleIDs: append([]string{}, exchange.AppliedRuleIDs...),
 		RequestTruncated: exchange.RequestTruncated, ResponseTruncated: exchange.ResponseTruncated,
 		InScope: exchange.InScope, ScopeVersion: exchange.ScopeVersion, ScopeRuleID: exchange.ScopeRuleID,
 		Request:  toMessageDTO(exchange.Request.Headers, exchange.Request.Body, exchange.Request.Raw, exchange.RequestTruncated),
@@ -460,6 +483,7 @@ func toExchangeDTO(exchange *store.Exchange) exchangeDTO {
 
 func toHistoryItemDTO(item store.HistoryItem) historyItemDTO {
 	return historyItemDTO{
+		ResponseIntercepted: item.ResponseIntercepted, AppliedRuleIDs: append([]string{}, item.AppliedRuleIDs...),
 		ID: item.ID, Method: item.Method, Scheme: item.Scheme, Host: item.Host, Path: item.Path, Query: item.Query,
 		Status: item.Status, MIMEType: item.MIMEType, RequestSize: item.RequestSize, ResponseSize: item.ResponseSize,
 		DurationMS: item.DurationMS, StartedAt: item.StartedAt, Intercepted: item.Intercepted, Error: item.Error,

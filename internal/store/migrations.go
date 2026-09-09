@@ -15,6 +15,14 @@ var migrations = []migration{
 	{version: 2, apply: applyProjectAndRepeaterSchema},
 	{version: 3, apply: applyTargetScopeSchema},
 	{version: 4, apply: applyTargetProjectionSchema},
+	{version: 5, apply: applyResponseInterceptSchema},
+}
+
+func applyResponseInterceptSchema(tx *sql.Tx) error {
+	_, err := tx.Exec(`
+		ALTER TABLE exchanges ADD COLUMN applied_rule_ids_json TEXT NOT NULL DEFAULT '[]';
+		ALTER TABLE exchanges ADD COLUMN response_intercepted INTEGER NOT NULL DEFAULT 0;`)
+	return err
 }
 
 func applyTargetProjectionSchema(tx *sql.Tx) error {

@@ -3,6 +3,7 @@ package intercept
 import "strings"
 
 type Rule struct {
+	StatusCode   int    `json:"statusCode,omitempty"`
 	Enabled      bool   `json:"enabled"`
 	Method       string `json:"method"`
 	HostContains string `json:"hostContains"`
@@ -11,13 +12,17 @@ type Rule struct {
 }
 
 type MatchRequest struct {
-	Method string
-	Host   string
-	Path   string
-	MIME   string
+	StatusCode int
+	Method     string
+	Host       string
+	Path       string
+	MIME       string
 }
 
 func Matches(rule Rule, req MatchRequest) bool {
+	if rule.StatusCode != 0 && rule.StatusCode != req.StatusCode {
+		return false
+	}
 	if !rule.Enabled {
 		return false
 	}
