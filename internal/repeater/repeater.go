@@ -30,6 +30,7 @@ type SendResult struct {
 type Service struct {
 	transport      http.RoundTripper
 	bodyLimitBytes int64
+	requestTimeout time.Duration
 }
 
 func NewService(transport http.RoundTripper, bodyLimitBytes int64) *Service {
@@ -44,10 +45,12 @@ func NewService(transport http.RoundTripper, bodyLimitBytes int64) *Service {
 	if bodyLimitBytes < 0 {
 		bodyLimitBytes = 0
 	}
-	return &Service{transport: transport, bodyLimitBytes: bodyLimitBytes}
+	return &Service{transport: transport, bodyLimitBytes: bodyLimitBytes, requestTimeout: 60 * time.Second}
 }
 
 func (s *Service) Send(ctx context.Context, req SendRequest) (SendResult, error) {
+	ctx, cancel := context.WithTimeout(ctx, s.requestTimeout)
+	defer cancel()
 	request, err := http.NewRequestWithContext(ctx, req.Method, req.URL, bytes.NewReader(req.Body))
 	if err != nil {
 		return SendResult{}, fmt.Errorf("create repeater request: %w", err)

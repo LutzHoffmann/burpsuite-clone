@@ -7,7 +7,25 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 )
+
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripperFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func TestSendAppliesSixtySecondDeadline(t *testing.T) {
+	service := NewService(roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+		deadline, ok := r.Context().Deadline()
+		if !ok {
+			t.Error("request has no total deadline")
+		} else if remaining := time.Until(deadline); remaining <= 59*time.Second || remaining > 60*time.Second {
+			t.Errorf("remaining deadline = %v", remaining)
+		}
+		return nil, context.Canceled
+	}), 1024)
+	_, _ = service.Send(context.Background(), SendRequest{Method: http.MethodGet, URL: "http://example.test"})
+}
 
 func TestSendReturnsCapturedResponse(t *testing.T) {
 	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -36,6 +54,59 @@ func TestSendReturnsCapturedResponse(t *testing.T) {
 	}
 	if string(result.Body) != "repeater response" {
 		t.Fatalf("Body = %q", result.Body)
+	}
+}
+
+func TestSendCancelsStalledResponse(t *testing.T) {
+	for _, flushHeaders := range []bool{false, true} {
+		name := "headers"
+		if flushHeaders {
+			name = "body"
+		}
+		t.Run(name, func(t *testing.T) {
+			disconnected := make(chan struct{})
+			target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if flushHeaders {
+					_, _ = io.WriteString(w, "partial")
+					w.(http.Flusher).Flush()
+				}
+				<-r.Context().Done()
+				close(disconnected)
+			}))
+			defer target.Close()
+			service := NewService(nil, 1024)
+			service.requestTimeout = 100 * time.Millisecond
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_, err := service.Send(ctx, SendRequest{Method: http.MethodGet, URL: target.URL})
+			if !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("error = %v", err)
+			}
+			if ctx.Err() != nil {
+				t.Fatal("parent timeout fired instead of service deadline")
+			}
+			select {
+			case <-disconnected:
+			case <-time.After(time.Second):
+				t.Fatal("upstream connection was not cancelled")
+			}
+		})
+	}
+}
+
+func TestSendPreservesEarlierCallerDeadline(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	want, _ := ctx.Deadline()
+	service := NewService(roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+		if got, _ := r.Context().Deadline(); !got.Equal(want) {
+			t.Errorf("deadline = %v, want %v", got, want)
+		}
+		return nil, context.Canceled
+	}), 1024)
+	_, err := service.Send(ctx, SendRequest{Method: http.MethodGet, URL: "http://example.test"})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error = %v", err)
 	}
 }
 

@@ -11,6 +11,10 @@ Site Map, and local project storage.
 See [Response interception and replacement rules](docs/setup/response-intercept.md)
 for the v2b workflow, examples, and body-editing limits.
 
+Repeater requests have a 60-second total timeout, including connection setup and
+response body transfer. A shorter caller deadline still takes precedence. Timed-out
+requests return an explicit timeout error rather than a successful partial response.
+
 ## Safety
 
 Use this tool only against systems you own or are authorized to test. Captured traffic and generated certificates stay local by default.

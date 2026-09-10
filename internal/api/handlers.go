@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -370,6 +371,10 @@ func (s *Server) handleRepeaterSend(w http.ResponseWriter, r *http.Request) {
 		Method: request.Method, URL: request.URL, Headers: request.Headers, Body: []byte(request.Body),
 	})
 	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			http.Error(w, "repeater request timed out", http.StatusGatewayTimeout)
+			return
+		}
 		http.Error(w, "send repeater request", http.StatusBadGateway)
 		return
 	}

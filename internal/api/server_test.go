@@ -127,6 +127,19 @@ func TestRootServesOperatorFallback(t *testing.T) {
 	}
 }
 
+func TestRepeaterTimeoutReturnsGatewayTimeout(t *testing.T) {
+	srv := NewServer(Config{Repeater: repeater.NewService(nil, 1024), APIAddr: "127.0.0.1:9080"})
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+	request := httptest.NewRequest(http.MethodPost, "/api/repeater/sessions/7/send", strings.NewReader(`{"method":"GET","url":"http://127.0.0.1:1"}`)).WithContext(ctx)
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	srv.handleRepeaterSend(response, request)
+	if response.Code != http.StatusGatewayTimeout || !strings.Contains(response.Body.String(), "timed out") {
+		t.Fatalf("status = %d, body = %q", response.Code, response.Body.String())
+	}
+}
+
 func TestRepeaterSend(t *testing.T) {
 	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
