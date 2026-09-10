@@ -319,7 +319,7 @@ func (s *Server) handleInterceptForward(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	var edit interceptItemDTO
-	if err := s.decodeJSON(w, r, &edit); err != nil {
+	if err := s.decodeEditJSON(w, r, &edit, &edit.Body); err != nil {
 		return
 	}
 	if !item.BodyEditable && edit.Body != "" {

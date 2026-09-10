@@ -1140,9 +1140,11 @@ func TestProxyScopeObserverFailureDoesNotChangeResponseOrLeakError(t *testing.T)
 		}),
 	})
 
-	response := serveRequestThroughProxy(t, srv, outOfScopeTargetURL(t))
-	if response.StatusCode != http.StatusOK {
-		t.Fatalf("status = %d", response.StatusCode)
+	// Wait for the entire handler, including observation and logging, to finish.
+	response := httptest.NewRecorder()
+	srv.handleHTTP(response, httptest.NewRequest(http.MethodGet, outOfScopeTargetURL(t), nil))
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d", response.Code)
 	}
 	if strings.Contains(logs.String(), "secret request body") {
 		t.Fatalf("observer error leaked into logs: %q", logs.String())

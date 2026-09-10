@@ -7,6 +7,17 @@ import type { InterceptConfig, ReplacementRule } from '../types';
 const rule = (id: string): ReplacementRule => ({ id, enabled: true, direction: 'request', target: 'body', header: '', pattern: 'before', replacement: 'after', regex: false, hostContains: '', pathContains: '', mimeContains: '' });
 const config: InterceptConfig = { enabled: true, rules: [], responseEnabled: false, responseRules: [], replacementRules: [rule('first'), rule('second')] };
 
+test('empty legacy null rule lists remain editable after reload', () => {
+  const save = vi.fn();
+  render(<InterceptRules config={{ ...config, rules: null, responseRules: null, replacementRules: null } as unknown as InterceptConfig} disabled={false} onSave={save} />);
+  fireEvent.click(screen.getByText('Request filters'));
+  fireEvent.click(screen.getByRole('button', { name: 'Save request filters' }));
+  expect(save).toHaveBeenCalledWith({ rules: [] });
+  fireEvent.click(screen.getByText('Response filters'));
+  fireEvent.click(screen.getByRole('button', { name: 'Save response filters' }));
+  expect(save).toHaveBeenCalledWith({ responseRules: [] });
+});
+
 test('edits and saves response filters independently', () => {
   const save = vi.fn();
   render(<InterceptRules config={config} disabled={false} onSave={save} />);

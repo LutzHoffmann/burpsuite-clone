@@ -7,6 +7,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -27,6 +28,167 @@ import (
 	"github.com/lutzifer/burpsuite-clone/internal/scope"
 	"github.com/lutzifer/burpsuite-clone/internal/store"
 )
+
+func TestTruncatedChunkedResponseReportsClientError(t *testing.T) {
+	for _, secure := range []bool{false, true} {
+		t.Run(fmt.Sprintf("https=%v", secure), func(t *testing.T) {
+			h := newHarness(t, secure, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "text/plain")
+				_, _ = io.WriteString(w, "partial")
+				w.(http.Flusher).Flush()
+				panic(http.ErrAbortHandler)
+			}))
+			select {
+			case got := <-h.request(http.MethodGet, "/allowed", ""):
+				if got.err == nil {
+					t.Errorf("truncated response accepted as complete: %q", got.body)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("client did not finish")
+			}
+			if !h.waitHistory(1).Error {
+				t.Error("truncation missing from history")
+			}
+		})
+	}
+}
+
+func TestStreamingEventArrivesBeforeUpstreamCloses(t *testing.T) {
+	for _, secure := range []bool{false, true} {
+		t.Run(fmt.Sprintf("https=%t", secure), func(t *testing.T) {
+			release := make(chan struct{})
+			h := newHarness(t, secure, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "text/event-stream")
+				_, _ = io.WriteString(w, "data: hello\n\n")
+				w.(http.Flusher).Flush()
+				select {
+				case <-release:
+				case <-r.Context().Done():
+				}
+			}))
+			t.Cleanup(func() { close(release) })
+			done := make(chan error, 1)
+			go func() {
+				response, err := h.client.Get(h.upstream + "/allowed")
+				if err != nil {
+					done <- err
+					return
+				}
+				defer response.Body.Close()
+				body := make([]byte, len("data: hello\n\n"))
+				_, err = io.ReadFull(response.Body, body)
+				if err == nil && string(body) != "data: hello\n\n" {
+					err = fmt.Errorf("unexpected event %q", body)
+				}
+				done <- err
+			}()
+			select {
+			case err := <-done:
+				if err != nil {
+					t.Fatal(err)
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatal("first streaming event withheld while upstream remains open")
+			}
+			_ = h.waitHistory(1)
+		})
+	}
+}
+
+func TestResponseTrailersSurviveProxy(t *testing.T) {
+	for _, secure := range []bool{false, true} {
+		t.Run(fmt.Sprintf("https=%t", secure), func(t *testing.T) {
+			h := newHarness(t, secure, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "text/plain")
+				w.Header().Set("Trailer", "X-Checksum")
+				_, _ = io.WriteString(w, "checksum body")
+				w.Header().Set("X-Checksum", "complete")
+			}))
+			got := await(t, h.request("GET", "/allowed", ""))
+			if got.body != "checksum body" || got.trailers.Get("X-Checksum") != "complete" {
+				t.Fatalf("lost body or trailer: body=%q trailers=%v", got.body, got.trailers)
+			}
+			_ = h.waitHistory(1)
+		})
+	}
+}
+
+func TestHTTPSDisconnectClearsResponseQueue(t *testing.T) {
+	h := newHarness(t, true, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		_, _ = io.WriteString(w, "pending")
+	}))
+	h.json(http.MethodPut, "/api/intercept/config", map[string]any{
+		"enabled": false, "rules": []any{}, "responseEnabled": true,
+		"responseRules": []any{map[string]any{"enabled": true}}, "replacementRules": []any{},
+	}, 200, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	request, err := http.NewRequestWithContext(ctx, "GET", h.upstream+"/allowed", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		response, err := h.client.Do(request)
+		if response != nil {
+			_ = response.Body.Close()
+		}
+		done <- err
+	}()
+	_ = h.waitResponse()
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("client did not cancel: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("client cancellation stalled")
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		var queue []pending
+		h.json("GET", "/api/intercept/response-queue", nil, 200, &queue)
+		if len(queue) == 0 {
+			_ = h.waitHistory(1)
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("disconnected HTTPS response retained a queue slot")
+}
+
+func TestResponseAtCaptureLimitCanForwardUnchanged(t *testing.T) {
+	const size = 1 << 20
+	body := strings.Repeat("\"", size)
+	for _, secure := range []bool{false, true} {
+		t.Run(fmt.Sprintf("https=%t", secure), func(t *testing.T) {
+			h := newHarness(t, secure, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "text/plain")
+				w.Header().Set("Content-Length", fmt.Sprint(size))
+				_, _ = io.WriteString(w, body)
+			}))
+			h.json("PUT", "/api/intercept/config", map[string]any{
+				"enabled": false, "rules": []any{}, "responseEnabled": true,
+				"responseRules": []any{map[string]any{"enabled": true}}, "replacementRules": []any{},
+			}, 200, nil)
+			result := h.request("GET", "/allowed", "")
+			item := h.waitResponse()
+			if !item.BodyEditable || item.Body != body {
+				t.Fatal("body at capture limit was not editable")
+			}
+			h.json("POST", "/api/intercept/response/"+item.ID+"/forward", map[string]any{
+				"statusCode": 200, "headers": item.Headers, "body": item.Body,
+			}, 204, nil)
+			got := await(t, result)
+			if got.status != 200 || got.body != body {
+				t.Fatalf("unchanged forward failed: status=%d bytes=%d", got.status, len(got.body))
+			}
+			_ = h.waitHistory(1)
+		})
+	}
+}
 
 func TestResponseHeaderOnlyPreservesBodiesThroughAPI(t *testing.T) {
 	var encoded bytes.Buffer
@@ -314,10 +476,11 @@ func (h *harness) waitHistory(count int) historyDetail {
 }
 
 type clientResult struct {
-	status  int
-	body    string
-	headers http.Header
-	err     error
+	status   int
+	body     string
+	headers  http.Header
+	trailers http.Header
+	err      error
 }
 
 func (h *harness) request(method, path, body string) <-chan clientResult {
@@ -339,7 +502,7 @@ func (h *harness) request(method, path, body string) <-chan clientResult {
 		}
 		defer response.Body.Close()
 		data, err := io.ReadAll(response.Body)
-		result <- clientResult{status: response.StatusCode, body: string(data), headers: response.Header, err: err}
+		result <- clientResult{status: response.StatusCode, body: string(data), headers: response.Header, trailers: response.Trailer.Clone(), err: err}
 	}()
 	return result
 }

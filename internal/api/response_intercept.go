@@ -47,7 +47,7 @@ func (s *Server) handleResponseForward(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var edit responseEditDTO
-	if err := s.decodeJSON(w, r, &edit); err != nil {
+	if err := s.decodeEditJSON(w, r, &edit, &edit.Body); err != nil {
 		return
 	}
 	if err := validateResponseEdit(item, edit); err != nil {

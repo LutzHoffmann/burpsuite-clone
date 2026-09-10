@@ -27,9 +27,9 @@ func NewController(queue *Queue, enabled bool, rules []Rule) *Controller {
 func (c *Controller) ResponseQueue() *Queue { return c.responseQueue }
 
 func cloneState(s ControllerState) ControllerState {
-	s.Rules = append([]Rule(nil), s.Rules...)
-	s.ResponseRules = append([]Rule(nil), s.ResponseRules...)
-	s.ReplacementRules = append([]ReplacementRule(nil), s.ReplacementRules...)
+	s.Rules = append([]Rule{}, s.Rules...)
+	s.ResponseRules = append([]Rule{}, s.ResponseRules...)
+	s.ReplacementRules = append([]ReplacementRule{}, s.ReplacementRules...)
 	return s
 }
 

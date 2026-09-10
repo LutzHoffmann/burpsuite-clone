@@ -1,8 +1,6 @@
 package proxy
 
 import (
-	"bufio"
-	"bytes"
 	"context"
 	"crypto/tls"
 	"errors"
@@ -146,6 +144,7 @@ func (s *Server) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	clientHeaders := response.Header.Clone()
 	stripHopByHopHeaders(clientHeaders)
 	copyHeaders(w.Header(), clientHeaders)
+	trailers := announceTrailers(w.Header(), response.Trailer)
 	if client != nil {
 		_ = client.SetWriteDeadline(time.Now().Add(s.cfg.StreamIdleTimeout))
 		defer func() { _ = client.SetWriteDeadline(time.Time{}) }()
@@ -155,7 +154,14 @@ func (s *Server) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	if client != nil {
 		destination = &idleTimeoutWriter{Writer: w, connection: client, timeout: s.cfg.StreamIdleTimeout}
 	}
-	_, copyErr := io.Copy(destination, capturedResponse)
+	controller := http.NewResponseController(w)
+	copyErr := controller.Flush()
+	if copyErr == nil {
+		_, copyErr = io.Copy(&flushingWriter{Writer: destination, controller: controller}, capturedResponse)
+	}
+	if copyErr == nil {
+		copyTrailers(w.Header(), response.Trailer, trailers)
+	}
 	closeErr := capturedResponse.Close()
 	if copyErr != nil {
 		log.Printf("proxy: stream upstream response: %v", copyErr)
@@ -164,6 +170,10 @@ func (s *Server) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		log.Printf("proxy: close upstream response: %v", closeErr)
 	}
 	s.saveCompletedExchange(prepared, response, responseHeaders, capturedResponse, startedAt, errors.Join(copyErr, closeErr))
+	if copyErr != nil {
+		// Do not turn an incomplete upstream body into a clean downstream EOF.
+		panic(http.ErrAbortHandler)
+	}
 }
 
 func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
@@ -177,7 +187,6 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 		log.Printf("proxy: hijack CONNECT connection: %v", err)
 		return
 	}
-	client = withIdleTimeout(client, s.cfg.StreamIdleTimeout)
 	defer client.Close()
 
 	host := r.Host
@@ -202,64 +211,8 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 		log.Printf("proxy: handshake CONNECT client: %v", err)
 		return
 	}
-	reader := bufio.NewReader(tlsClient)
-	for {
-		_ = tlsClient.SetReadDeadline(time.Now().Add(s.cfg.StreamIdleTimeout))
-		inner, err := http.ReadRequest(reader)
-		if err != nil {
-			if !errors.Is(err, io.EOF) && !isTimeout(err) {
-				log.Printf("proxy: read CONNECT request: %v", err)
-			}
-			return
-		}
-		inner.URL.Scheme = "https"
-		inner.URL.Host = host
-		inner.RequestURI = inner.URL.RequestURI()
-		if !s.forwardHTTPS(tlsClient, inner) {
-			return
-		}
-	}
-}
-
-func (s *Server) forwardHTTPS(client net.Conn, request *http.Request) bool {
-	startedAt := time.Now().UTC()
-	rules := s.currentScopeRules()
-	decision := classifyWithRules(rules, request)
-	prepared, err := s.prepareRequest(request, decision, rules)
-	if err != nil {
-		s.savePreparationFailure(request, decision, startedAt, err)
-		return writeTunnelError(client, request, http.StatusGatewayTimeout, "intercept request")
-	}
-	if prepared.dropped {
-		s.saveDroppedExchange(request, prepared, startedAt)
-		return writeTunnelError(client, request, http.StatusForbidden, "request dropped")
-	}
-	if prepared.scopeRejected {
-		s.saveScopeRejectedExchange(prepared, startedAt)
-		return writeTunnelError(client, request, http.StatusForbidden, "edited request is out of scope")
-	}
-
-	response, err := s.cfg.Transport.RoundTrip(prepared.forward)
-	if err != nil {
-		s.saveRoundTripFailure(prepared, startedAt, err)
-		return writeTunnelError(client, request, http.StatusBadGateway, "forward request")
-	}
-	response = s.prepareResponse(prepared, response)
-	capturedResponse := newCapturingReadCloser(response.Body, s.cfg.BodyLimitBytes)
-	responseHeaders := response.Header.Clone()
-	stripHopByHopHeaders(response.Header)
-	response.Body = capturedResponse
-	_ = client.SetWriteDeadline(time.Now().Add(s.cfg.StreamIdleTimeout))
-	writeErr := response.Write(client)
-	closeErr := capturedResponse.Close()
-	if writeErr != nil {
-		log.Printf("proxy: stream HTTPS upstream response: %v", writeErr)
-	}
-	if closeErr != nil {
-		log.Printf("proxy: close HTTPS upstream response: %v", closeErr)
-	}
-	s.saveCompletedExchange(prepared, response, responseHeaders, capturedResponse, startedAt, errors.Join(writeErr, closeErr))
-	return writeErr == nil && !request.Close && !response.Close
+	_ = tlsClient.SetDeadline(time.Time{})
+	s.serveTunnel(tlsClient, host)
 }
 
 func (s *Server) currentScopeRules() *scope.RuleSet {
@@ -446,25 +399,6 @@ func isTextSafe(contentType string, body []byte) bool {
 	}
 	return strings.HasPrefix(mediaType, "text/") || strings.Contains(mediaType, "json") ||
 		strings.Contains(mediaType, "xml") || mediaType == "application/x-www-form-urlencoded"
-}
-
-func writeTunnelError(client net.Conn, request *http.Request, status int, message string) bool {
-	body := []byte(message + "\n")
-	response := &http.Response{
-		StatusCode: status, Status: fmt.Sprintf("%d %s", status, http.StatusText(status)),
-		Proto: "HTTP/1.1", ProtoMajor: 1, ProtoMinor: 1,
-		Header: http.Header{"Content-Type": {"text/plain; charset=utf-8"}},
-		Body:   io.NopCloser(bytes.NewReader(body)), ContentLength: int64(len(body)), Request: request,
-	}
-	if err := response.Write(client); err != nil {
-		return false
-	}
-	return !request.Close
-}
-
-func isTimeout(err error) bool {
-	var netErr net.Error
-	return errors.As(err, &netErr) && netErr.Timeout()
 }
 
 type prefixReadCloser struct {

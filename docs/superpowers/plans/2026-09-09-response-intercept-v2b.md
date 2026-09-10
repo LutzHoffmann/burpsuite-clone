@@ -47,7 +47,7 @@ results and any residual gaps accurately.
   reversible implementation details.
 - Tasks 1-3: implemented. Delegated workers stopped at their usage limit; the
   coordinator reviewed and completed the integration and remaining fixes.
-- Task 4: local verification complete: Go suite, race checks, vet, 80 frontend
+- Task 4: local verification complete: Go suite, race checks, vet, 81 frontend
   tests, production build, and full Windows cross-compilation (without executing
   Windows tests). Browser checks verified rule saving/reloading and a 390px view.
 - Integration tests exercise real HTTP/HTTPS through API and SQLite, manual
@@ -56,5 +56,12 @@ results and any residual gaps accurately.
 - Review fixes: queue header cloning, rule ordering when earlier rules enable
   later body filters, noneditable body forwarding, bounded regex match/capture
   metadata, and standard Unicode replacement-template semantics.
-- Independent final agent review was unavailable after the usage-limit stop;
-  coordinator code review and executable verification were performed instead.
+- Independent final review completed on 2026-09-10 with no remaining blockers
+  in the reviewed changes. Fixed empty-list JSON compatibility, HTTPS queue
+  cancellation on disconnect, and separate raw-body/JSON-envelope edit limits.
+- HTTP/HTTPS regression tests additionally verify immediate streaming delivery,
+  response trailer preservation, and client-visible errors for truncated streams.
+  Error history is persisted before aborting downstream framing. A log assertion
+  test now waits for handler completion instead of racing response delivery.
+- Final verification: full Go race suite, vet, 81 frontend tests, production
+  build, and Windows cross-compilation passed. Windows tests were not run locally.

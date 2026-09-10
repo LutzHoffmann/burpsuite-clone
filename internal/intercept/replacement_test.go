@@ -2,12 +2,27 @@ package intercept
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"regexp"
 	"strings"
 	"testing"
 	"time"
 )
+
+func TestEmptyControllerListsSerializeAsArrays(t *testing.T) {
+	c := NewController(nil, false, nil)
+	c.Update(ControllerState{})
+	data, err := json.Marshal(c.State())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"rules", "responseRules", "replacementRules"} {
+		if !strings.Contains(string(data), `"`+key+`":[]`) {
+			t.Fatalf("%s not an empty array: %s", key, data)
+		}
+	}
+}
 
 func TestReplacementMatchesStandardTemplateSemantics(t *testing.T) {
 	for _, template := range []string{"$1é", "${1}é", "$name界", "${name}", "${bad$1}", "$$$1", "$1_", "$", "${", "$01"} {

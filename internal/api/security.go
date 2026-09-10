@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"mime"
 	"net"
 	"net/http"
@@ -90,12 +91,33 @@ func effectivePort(value *url.URL) string {
 }
 
 func (s *Server) decodeJSON(w http.ResponseWriter, r *http.Request, destination interface{}) error {
+	return decodeJSONLimit(w, r, destination, s.cfg.MaxBodyBytes)
+}
+
+func (s *Server) decodeEditJSON(w http.ResponseWriter, r *http.Request, destination interface{}, body *string) error {
+	// A raw byte can occupy six JSON bytes (\u00XX), plus bounded edit metadata.
+	const metadataBytes int64 = 1 << 20
+	limit := int64(math.MaxInt64)
+	if s.cfg.MaxBodyBytes <= (math.MaxInt64-metadataBytes)/6 {
+		limit = 6*s.cfg.MaxBodyBytes + metadataBytes
+	}
+	if err := decodeJSONLimit(w, r, destination, limit); err != nil {
+		return err
+	}
+	if int64(len(*body)) > s.cfg.MaxBodyBytes {
+		http.Error(w, "edited body too large", http.StatusRequestEntityTooLarge)
+		return errors.New("edited body too large")
+	}
+	return nil
+}
+
+func decodeJSONLimit(w http.ResponseWriter, r *http.Request, destination interface{}, limit int64) error {
 	mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
 	if err != nil || mediaType != "application/json" {
 		http.Error(w, "Content-Type must be application/json", http.StatusUnsupportedMediaType)
 		return errors.New("invalid JSON content type")
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, s.cfg.MaxBodyBytes)
+	r.Body = http.MaxBytesReader(w, r.Body, limit)
 	decoder := json.NewDecoder(r.Body)
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(destination); err != nil {
@@ -108,6 +130,11 @@ func (s *Server) decodeJSON(w http.ResponseWriter, r *http.Request, destination 
 		return fmt.Errorf("decode JSON: %w", err)
 	}
 	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		var maxBytesErr *http.MaxBytesError
+		if errors.As(err, &maxBytesErr) {
+			http.Error(w, "JSON body too large", http.StatusRequestEntityTooLarge)
+			return fmt.Errorf("decode JSON: %w", err)
+		}
 		http.Error(w, "JSON body must contain one value", http.StatusBadRequest)
 		return errors.New("multiple JSON values")
 	}

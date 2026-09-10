@@ -3,6 +3,7 @@ import type { InterceptConfig, InterceptRule, ReplacementRule } from '../types';
 
 export const matchAllRule = (): InterceptRule => ({ enabled: true, method: '', hostContains: '', pathContains: '', mimeContains: '', statusCode: 0 });
 const emptyReplacements: ReplacementRule[] = [];
+const emptyFilters: InterceptRule[] = [];
 const defaultResponseRules = [matchAllRule()];
 type Props = { config: InterceptConfig; disabled: boolean; onSave: (patch: Partial<InterceptConfig>) => void };
 const commonFilters = [['hostContains', 'Host contains'], ['pathContains', 'Path contains'], ['mimeContains', 'MIME contains']] as const;
@@ -76,8 +77,8 @@ function ReplacementEditor({ rules, disabled, onSave }: { rules: ReplacementRule
 export function InterceptRules({ config, disabled, onSave }: Props) {
   return <section className="intercept-rules" aria-label="Interception rules">
     <p>Binary, encoded, streaming and oversized bodies bypass body editing and replacements without losing bytes. Headers remain editable where protocol-safe. Dropping a response returns a local 502.</p>
-    <FilterEditor title="Request" rules={config.rules} disabled={disabled} onSave={(rules) => onSave({ rules })} />
-    <FilterEditor title="Response" rules={config.responseRules ?? defaultResponseRules} disabled={disabled} onSave={(responseRules) => onSave({ responseRules })} />
+    <FilterEditor title="Request" rules={config.rules ?? emptyFilters} disabled={disabled} onSave={(rules) => onSave({ rules })} />
+    <FilterEditor title="Response" rules={config.responseRules === undefined ? defaultResponseRules : config.responseRules ?? emptyFilters} disabled={disabled} onSave={(responseRules) => onSave({ responseRules })} />
     <ReplacementEditor rules={config.replacementRules ?? emptyReplacements} disabled={disabled} onSave={(replacementRules) => onSave({ replacementRules })} />
   </section>;
 }
