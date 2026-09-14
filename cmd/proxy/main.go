@@ -70,6 +70,9 @@ func main() {
 		log.Fatal(err)
 	}
 	defer proxyListener.Close()
+	if err := history.RecoverWSConnections(context.Background()); err != nil {
+		log.Fatalf("recover WebSocket history: %v", err)
+	}
 	proxyServer := proxy.NewServer(proxy.Config{
 		Store:          history,
 		BodyLimitBytes: cfg.BodyLimitBytes,

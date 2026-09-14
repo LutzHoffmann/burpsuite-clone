@@ -17,6 +17,40 @@ var migrations = []migration{
 	{version: 4, apply: applyTargetProjectionSchema},
 	{version: 5, apply: applyResponseInterceptSchema},
 	{version: 6, apply: applyCaptureQuotaSchema},
+	{version: 7, apply: applyWebSocketSchema},
+}
+
+func applyWebSocketSchema(tx *sql.Tx) error {
+	_, err := tx.Exec(`
+ CREATE TABLE ws_connections (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  url TEXT NOT NULL CHECK(length(CAST(url AS BLOB)) <= 65536),
+  in_scope INTEGER NOT NULL CHECK(in_scope IN (0,1)),
+  opened_at_unix_nano INTEGER NOT NULL,
+  closed_at_unix_nano INTEGER,
+  state TEXT NOT NULL CHECK(state IN ('open','closed','interrupted')),
+  gaps INTEGER NOT NULL DEFAULT 0 CHECK(gaps >= 0),
+  capture_incomplete INTEGER NOT NULL DEFAULT 0 CHECK(capture_incomplete IN (0,1)),
+  capture_bytes INTEGER NOT NULL CHECK(capture_bytes >= 0)
+ );
+ CREATE TABLE ws_messages (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  connection_id INTEGER NOT NULL REFERENCES ws_connections(id),
+  sequence INTEGER NOT NULL CHECK(sequence >= 0),
+  direction TEXT NOT NULL CHECK(length(CAST(direction AS BLOB)) BETWEEN 1 AND 64),
+  observed_at_unix_nano INTEGER NOT NULL,
+  type TEXT NOT NULL CHECK(length(CAST(type AS BLOB)) BETWEEN 1 AND 32),
+  size INTEGER NOT NULL CHECK(size >= 0),
+  payload BLOB,
+  truncated INTEGER NOT NULL CHECK(truncated IN (0,1)),
+  complete INTEGER NOT NULL CHECK(complete IN (0,1)),
+  encoding TEXT NOT NULL CHECK(length(CAST(encoding AS BLOB)) <= 64),
+  capture_bytes INTEGER NOT NULL CHECK(capture_bytes >= 0),
+  UNIQUE(connection_id, sequence)
+ );
+ CREATE INDEX ws_messages_connection_id ON ws_messages(connection_id, id DESC);
+ CREATE INDEX ws_connections_open ON ws_connections(id) WHERE state = 'open';`)
+	return err
 }
 
 func applyCaptureQuotaSchema(tx *sql.Tx) error {

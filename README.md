@@ -6,7 +6,11 @@ Local proxy-first web application for authorized web application security testin
 
 The application provides HTTP/HTTPS proxying, independent request and response interception,
 ordered regex/literal replacements, history, inspection, Repeater, Target Scope,
-Site Map, and local project storage.
+Site Map, passive WebSocket history, and local project storage.
+
+WebSocket forwarding supports `ws://` and `wss://`, with a read-only message
+inspector. See [WebSocket history](docs/setup/websockets.md) for capture limits,
+opaque compressed payloads, and the HTTP-interception bypass.
 
 See [Response interception and replacement rules](docs/setup/response-intercept.md)
 for the v2b workflow, examples, and body-editing limits.

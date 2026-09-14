@@ -1,3 +1,17 @@
+export interface WSConnection {
+  id: number; url: string; inScope: boolean; openedAt: string; closedAt: string | null;
+  state: string; gaps: number; captureIncomplete: boolean;
+}
+
+export interface WSMessage {
+  id: number; connectionId: number; sequence: number; direction: string; observedAt: string;
+  type: string; size: number; truncated: boolean; complete: boolean; encoding: string;
+}
+
+export interface WSMessageDetail extends WSMessage { payload: string; payloadFormat: 'text' | 'hex' }
+export interface WSPage<T> { items: T[]; nextBeforeId: number; snapshotId: number }
+export interface WSCursor { beforeId?: number; snapshotId?: number }
+
 export interface StatusDTO {
   apiAddr: string;
   proxyAddr: string;

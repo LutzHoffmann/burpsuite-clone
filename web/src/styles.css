@@ -1,4 +1,22 @@
 :root { font-family: "IBM Plex Mono", "SFMono-Regular", Menlo, monospace; color: #d9e1df; background: #101817; font-synthesis: none; }
+.ws-workspace { grid-column: 2 / -1; display: grid; grid-template-columns: minmax(260px, .65fr) minmax(360px, 1fr); align-content: start; min-width: 0; overflow: auto; }
+.ws-header { grid-column: 1 / -1; padding: 16px; border-bottom: 1px solid #2b3a37; }
+.ws-header h1 { margin: 4px 0 12px; font-size: 18px; }
+.ws-header p, .ws-notice, .ws-connection-detail p, .ws-payload p { font-size: 11px; line-height: 1.6; color: #899a94; }
+.ws-connections, .ws-messages { min-width: 0; border-right: 1px solid #2b3a37; }
+.ws-heading { margin: 16px; font-size: 13px; }
+.ws-notice { margin: 8px 16px; color: #e7b463; }
+.ws-list { max-height: 48vh; overflow: auto; }
+.ws-row { display: flex; flex-direction: column; gap: 7px; width: 100%; padding: 12px 16px; text-align: left; border: 0; border-bottom: 1px solid #2b3a37; background: #101817; color: #cbd7d3; font-size: 11px; cursor: pointer; overflow-wrap: anywhere; }
+.ws-row[aria-pressed="true"] { background: #20312d; box-shadow: inset 3px 0 #e7a243; }
+.ws-row:focus-visible { outline: 1px solid #e7a243; outline-offset: -2px; }
+.ws-row time { color: #899a94; font-size: 10px; }
+.ws-labels { display: flex; flex-wrap: wrap; gap: 5px; font-size: 10px; }
+.ws-labels > span { border: 1px solid #3a4a46; padding: 3px 5px; }
+.ws-connection-detail, .ws-payload { padding: 16px; border-bottom: 1px solid #2b3a37; overflow-wrap: anywhere; }
+.ws-connection-detail h2, .ws-payload h2 { font-size: 13px; margin: 0 0 12px; }
+.ws-payload pre { max-height: 45vh; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; background: #0d1514; padding: 12px; font-size: 11px; }
+@media (max-width: 720px) { .ws-workspace { grid-column: 1; grid-template-columns: minmax(0, 1fr); }.ws-header { grid-column: 1; } }
 * { box-sizing: border-box; }
 body { margin: 0; min-width: 320px; min-height: 100vh; background: radial-gradient(circle at 90% 0%, #213c37 0, transparent 30rem), #101817; }
 button, input { font: inherit; }

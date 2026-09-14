@@ -27,6 +27,7 @@ import { Repeater } from './components/Repeater';
 import { Settings } from './components/Settings';
 import { StatusBar } from './components/StatusBar';
 import { TargetWorkspace } from './components/TargetWorkspace';
+import { WebSocketsWorkspace } from './components/WebSocketsWorkspace';
 import type { Exchange, HistoryItem, InterceptConfig, InterceptItem, ScopeRule, SendRequest, SendResult, StatusDTO, TargetRefresh } from './types';
 
 const fallbackStatus: StatusDTO = {
@@ -131,6 +132,7 @@ function equivalentInclude(rule: ScopeRule, candidate: ScopeRule) {
 }
 
 export function App() {
+  const [wsCaptureLimited, setWSCaptureLimited] = useState(false);
   const [status, setStatus] = useState<StatusDTO>(fallbackStatus);
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [exchange, setExchange] = useState<Exchange | null>(null);
@@ -145,7 +147,7 @@ export function App() {
   const [repeaterRequest, setRepeaterRequest] = useState<SendRequest>(emptyRepeaterRequest);
   const [repeaterResult, setRepeaterResult] = useState<SendResult | null>(null);
   const [apiErrors, setAPIErrors] = useState<Record<string, string | undefined>>({});
-  const [view, setView] = useState<'traffic' | 'target' | 'settings'>('traffic');
+  const [view, setView] = useState<'traffic' | 'target' | 'websockets' | 'settings'>('traffic');
   const [historyQuery, setHistoryQuery] = useState('');
   const [historyScope, setHistoryScope] = useState<'all' | 'in' | 'out'>('all');
   const [targetRefresh, setTargetRefresh] = useState<TargetRefresh>({ sequence: 0, type: 'initial' });
@@ -214,6 +216,7 @@ export function App() {
     void loadResponses();
     const disconnect = connectEvents((event) => {
       const eventType = event.type;
+      if (eventType === 'websocket.capture.limited') setWSCaptureLimited(true);
       eventHandlers.current.history(eventType);
       if (eventType === 'storage.status.changed') void eventHandlers.current.storage();
       if (eventType === 'proxy.status.changed') void loadStatus();
@@ -372,6 +375,10 @@ export function App() {
     <main className="app-shell">
       <div className="app-status">
         <StatusBar status={status} />
+        {wsCaptureLimited && <div className="storage-warning" role="alert">
+          Some WebSocket connections were not recorded because the 64-connection capture limit was reached. Forwarding continues; reconnect those connections when capacity is available.
+          <button className="quiet-button" type="button" onClick={() => setWSCaptureLimited(false)}>Dismiss</button>
+        </div>}
         {storage.status?.paused && <div className="storage-warning" role="alert">
           Capture storage is paused. New traffic is not being saved. Proxy forwarding continues.
           <button className="quiet-button" type="button" onClick={() => setView('settings')}>Open storage settings</button>
@@ -382,6 +389,7 @@ export function App() {
         <nav className="navigation" aria-label="Tools">
           <button className={`nav-item ${view === 'traffic' ? 'active' : ''}`} onClick={() => setView('traffic')} type="button"><Network size={17} />Traffic</button>
           <button className="nav-item" type="button"><History size={17} />History</button>
+          <button className={`nav-item ${view === 'websockets' ? 'active' : ''}`} onClick={() => setView('websockets')} type="button"><Network size={17} />WebSockets</button>
           <button className={`nav-item ${view === 'target' ? 'active' : ''}`} onClick={openTarget} type="button"><Map size={17} />Target</button>
           <button className="nav-item" type="button"><Send size={17} />Repeater</button>
           <button className="nav-item" type="button"><Boxes size={17} />Extensions</button>
@@ -389,7 +397,7 @@ export function App() {
           <button className={`nav-item ${view === 'settings' ? 'active' : ''}`} onClick={() => setView('settings')} type="button"><SlidersHorizontal size={17} />Settings</button>
         </nav>
 
-        {view === 'target' ? <TargetWorkspace
+        {view === 'websockets' ? <WebSocketsWorkspace /> : view === 'target' ? <TargetWorkspace
           refresh={targetRefresh}
           onOpenHistory={(id) => { setSelectedId(id); setView('traffic'); }}
           onSendToRepeater={(id) => { setView('traffic'); void sendHistoryToRepeater(id); }}

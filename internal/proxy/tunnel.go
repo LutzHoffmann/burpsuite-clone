@@ -7,12 +7,14 @@ import (
 	"net"
 	"net/http"
 	"sync"
+	"sync/atomic"
 )
 
 // Let net/http own the tunneled request lifecycle, including its background
 // disconnect read and cancellation while a response is awaiting operator input.
-func (s *Server) serveTunnel(connection net.Conn, host string) {
+func (s *Server) serveTunnel(connection net.Conn, host, scheme string) {
 	listener := &tunnelListener{connection: connection, closed: make(chan struct{})}
+	var hijacked atomic.Bool
 	server := &http.Server{
 		ReadHeaderTimeout: serverReadHeaderTimeout,
 		IdleTimeout:       s.cfg.StreamIdleTimeout,
@@ -20,16 +22,24 @@ func (s *Server) serveTunnel(connection net.Conn, host string) {
 			return context.WithValue(ctx, clientConnectionKey{}, conn)
 		},
 		ConnState: func(_ net.Conn, state http.ConnState) {
-			if state == http.StateClosed || state == http.StateHijacked {
+			if state == http.StateHijacked {
+				hijacked.Store(true)
+			}
+			if state == http.StateClosed {
 				_ = listener.Close()
 			}
 		},
 		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			defer func() {
+				if hijacked.Load() {
+					_ = listener.Close()
+				}
+			}()
 			if r.Method == http.MethodConnect {
 				http.Error(w, "nested CONNECT is unsupported", http.StatusMethodNotAllowed)
 				return
 			}
-			r.URL.Scheme = "https"
+			r.URL.Scheme = scheme
 			r.URL.Host = host
 			s.handleHTTP(w, r)
 		}),

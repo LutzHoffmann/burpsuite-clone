@@ -45,8 +45,12 @@ type Config struct {
 }
 
 type Server struct {
-	cfg    Config
-	nextID atomic.Uint64
+	cfg            Config
+	nextID         atomic.Uint64
+	wsActive       atomic.Int64
+	wsQueued       atomic.Int64
+	wsBytes        atomic.Int64
+	wsLimitWarning atomic.Bool
 }
 
 type preparedRequest struct {
@@ -107,6 +111,10 @@ func (s *Server) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		s.handleConnect(w, r)
 		return
 	}
+	if headerToken(r.Header, "Upgrade", "websocket") {
+		s.handleWebSocket(w, r)
+		return
+	}
 	client := clientConnection(r.Context())
 	if client != nil && r.Body != nil {
 		r.Body = &idleTimeoutReadCloser{ReadCloser: r.Body, connection: client, timeout: s.cfg.StreamIdleTimeout}
@@ -139,6 +147,11 @@ func (s *Server) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	response = s.prepareResponse(prepared, response)
+	s.writeHTTPResponse(w, r, prepared, response, startedAt)
+}
+
+func (s *Server) writeHTTPResponse(w http.ResponseWriter, r *http.Request, prepared *preparedRequest, response *http.Response, startedAt time.Time) {
+	client := clientConnection(r.Context())
 	capturedResponse := newCapturingReadCloser(response.Body, s.cfg.BodyLimitBytes)
 	responseHeaders := response.Header.Clone()
 	clientHeaders := response.Header.Clone()
@@ -182,7 +195,7 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	client, _, err := w.(http.Hijacker).Hijack()
+	client, buffered, err := w.(http.Hijacker).Hijack()
 	if err != nil {
 		log.Printf("proxy: hijack CONNECT connection: %v", err)
 		return
@@ -204,6 +217,17 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	_ = client.SetReadDeadline(time.Now().Add(s.cfg.StreamIdleTimeout))
+	first, err := buffered.Reader.Peek(1)
+	if err != nil {
+		return
+	}
+	client = &bufferedConnection{Conn: client, reader: buffered.Reader}
+	if first[0] != 0x16 {
+		_ = client.SetDeadline(time.Time{})
+		s.serveTunnel(client, host, "http")
+		return
+	}
 	tlsClient := tls.Server(client, &tls.Config{Certificates: []tls.Certificate{certificate}, MinVersion: tls.VersionTLS12})
 	defer tlsClient.Close()
 	_ = tlsClient.SetDeadline(time.Now().Add(s.cfg.StreamIdleTimeout))
@@ -212,7 +236,7 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_ = tlsClient.SetDeadline(time.Time{})
-	s.serveTunnel(tlsClient, host)
+	s.serveTunnel(tlsClient, host, "https")
 }
 
 func (s *Server) currentScopeRules() *scope.RuleSet {

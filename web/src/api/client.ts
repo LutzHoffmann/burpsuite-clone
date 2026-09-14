@@ -1,4 +1,5 @@
 import type { Exchange, HistoryItem, InterceptConfig, InterceptItem, RebuildStatus, ScopeRule, ScopeState, SendRequest, SendResult, StatusDTO, TargetEndpoint, TargetParameter, TargetRequestRef, TargetTreeNode } from '../types';
+import type { WSConnection, WSCursor, WSMessage, WSMessageDetail, WSPage } from '../types';
 
 export class ApiError extends Error {
   constructor(public readonly status: number, statusText: string) {
@@ -26,6 +27,17 @@ const jsonRequest = (method: string, value: unknown): RequestInit => ({
 });
 
 export const getStatus = () => api<StatusDTO>('/api/status');
+
+function wsQuery(cursor: WSCursor) {
+  const query = new URLSearchParams();
+  if (cursor.beforeId) query.set('beforeId', String(cursor.beforeId));
+  if (cursor.snapshotId) query.set('snapshotId', String(cursor.snapshotId));
+  return query.size ? `?${query}` : '';
+}
+export const getWSConnections = (cursor: WSCursor = {}) => api<WSPage<WSConnection>>(`/api/websockets${wsQuery(cursor)}`);
+export const getWSConnection = (id: number) => api<WSConnection>(`/api/websockets/${id}`);
+export const getWSMessages = (id: number, cursor: WSCursor = {}) => api<WSPage<WSMessage>>(`/api/websockets/${id}/messages${wsQuery(cursor)}`);
+export const getWSMessage = (id: number, messageId: number) => api<WSMessageDetail>(`/api/websockets/${id}/messages/${messageId}`);
 
 export interface HistoryPage { items: HistoryItem[]; nextBeforeId: number; snapshotId: number }
 export interface StorageStatus { limitBytes: number; usedBytes: number; paused: boolean; skippedRecords: number }
