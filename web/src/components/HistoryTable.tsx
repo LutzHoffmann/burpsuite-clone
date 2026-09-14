@@ -3,8 +3,6 @@ import type { HistoryItem } from '../types';
 type HistoryTableProps = {
   items: HistoryItem[];
   selectedId: number | null;
-  query: string;
-  scopeFilter: 'all' | 'in' | 'out';
   addingToScope: boolean;
   onSelect: (id: number) => void;
   onSendToRepeater: (id: number) => void;
@@ -19,14 +17,7 @@ function formatTime(startedAt: string) {
   return new Date(startedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 }
 
-export function HistoryTable({ items, selectedId, query, scopeFilter, addingToScope, onSelect, onSendToRepeater, onAddOriginToScope }: HistoryTableProps) {
-  const normalizedQuery = query.trim().toLowerCase();
-  const filteredItems = items.filter((item) => {
-    const matchesQuery = !normalizedQuery || [item.method, item.host, item.path, item.query].some((value) => value.toLowerCase().includes(normalizedQuery));
-    const matchesScope = scopeFilter === 'all' || (scopeFilter === 'in' ? item.inScope : !item.inScope);
-    return matchesQuery && matchesScope;
-  });
-
+export function HistoryTable({ items, selectedId, addingToScope, onSelect, onSendToRepeater, onAddOriginToScope }: HistoryTableProps) {
   return (
     <div className="request-table">
       <table aria-label="Request history">
@@ -34,7 +25,7 @@ export function HistoryTable({ items, selectedId, query, scopeFilter, addingToSc
           <th id="history-method" scope="col">Method</th><th id="history-host" scope="col">Host</th><th id="history-path" scope="col">Path</th><th id="history-status" scope="col">Status</th>
           <th id="history-mime" scope="col">MIME</th><th id="history-size" scope="col">Size</th><th id="history-duration" scope="col">Duration</th><th id="history-time" scope="col">Time</th><th id="history-scope" scope="col">Scope</th><th id="history-action" scope="col">Action</th>
         </tr></thead>
-        <tbody>{filteredItems.map((item) => <tr className={`table-row ${item.id === selectedId ? 'selected' : ''}`} key={item.id} onClick={(event) => {
+        <tbody>{items.map((item) => <tr className={`table-row ${item.id === selectedId ? 'selected' : ''}`} key={item.id} onClick={(event) => {
           if (!(event.target as HTMLElement).closest('button')) onSelect(item.id);
         }} onDoubleClick={(event) => {
           if (!(event.target as HTMLElement).closest('button')) onSendToRepeater(item.id);

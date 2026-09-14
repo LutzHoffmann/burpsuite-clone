@@ -339,6 +339,16 @@ func (s *Server) saveExchange(exchange *store.Exchange) {
 		return
 	}
 	if err := s.cfg.Store.SaveExchange(context.Background(), exchange); err != nil {
+		if errors.Is(err, store.ErrCaptureQuotaExceeded) {
+			if s.cfg.Events != nil {
+				if quota, ok := s.cfg.Store.(store.QuotaStore); ok {
+					if status, err := quota.StorageStatus(context.Background()); err == nil {
+						s.cfg.Events.PublishStoragePaused(status.Paused, status.Revision)
+					}
+				}
+			}
+			return
+		}
 		log.Printf("proxy: save exchange: %v", err)
 		return
 	}

@@ -14,7 +14,7 @@ jobs:
         with:
           go-version: '1.23'
       - run: go test ./...
-      - run: go test -race ./internal/scope ./internal/store ./internal/target ./internal/proxy ./internal/api ./internal/intercept ./internal/integration
+      - run: go test -race ./...
 
   windows:
     runs-on: windows-latest

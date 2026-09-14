@@ -15,6 +15,11 @@ Repeater requests have a 60-second total timeout, including connection setup and
 response body transfer. A shorter caller deadline still takes precedence. Timed-out
 requests return an explicit timeout error rather than a successful partial response.
 
+History uses 100-entry pages and server-side search. A configurable 1 GiB capture
+budget pauses new recording without deleting existing data or stopping proxy
+traffic. See [Capture storage and history](docs/setup/capture-storage.md) for
+accounting limits, warnings, and the paged API.
+
 ## Safety
 
 Use this tool only against systems you own or are authorized to test. Captured traffic and generated certificates stay local by default.

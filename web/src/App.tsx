@@ -8,7 +8,6 @@ import {
   dropResponse as dropResponseAPI,
   getResponseQueue,
   getExchange,
-  getHistory,
   getInterceptConfig,
   getInterceptQueue,
   getScopeState,
@@ -18,6 +17,8 @@ import {
   updateInterceptConfig,
 } from './api/client';
 import { connectEvents } from './api/events';
+import { useHistoryPage } from './api/useHistoryPage';
+import { useStorageStatus } from './api/useStorageStatus';
 import { HistoryTable } from './components/HistoryTable';
 import { InterceptPanel } from './components/InterceptPanel';
 import { InterceptRules, matchAllRule } from './components/InterceptRules';
@@ -35,12 +36,6 @@ const fallbackStatus: StatusDTO = {
   caTrust: 'unavailable',
   httpsInterception: false,
 };
-
-const developmentFallback: HistoryItem[] = [{
-  id: 1, method: 'GET', scheme: 'https', host: 'api.example.test', path: '/v1/example', query: '',
-  status: 200, mimeType: 'application/json', requestSize: 128, responseSize: 512, durationMs: 42,
-  startedAt: '2026-08-19T10:24:00Z', intercepted: false, error: false, inScope: false, scopeVersion: 0, scopeRuleId: null,
-}];
 
 const emptyRepeaterRequest: SendRequest = { method: 'GET', url: '', headers: {}, body: '' };
 
@@ -137,7 +132,6 @@ function equivalentInclude(rule: ScopeRule, candidate: ScopeRule) {
 
 export function App() {
   const [status, setStatus] = useState<StatusDTO>(fallbackStatus);
-  const [items, setItems] = useState<HistoryItem[]>([]);
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [exchange, setExchange] = useState<Exchange | null>(null);
   const [interceptItems, setInterceptItems] = useState<InterceptItem[]>([]);
@@ -157,6 +151,12 @@ export function App() {
   const [targetRefresh, setTargetRefresh] = useState<TargetRefresh>({ sequence: 0, type: 'initial' });
   const [addingOriginToScope, setAddingOriginToScope] = useState(false);
   const scopeMutationPending = useRef(false);
+  const history = useHistoryPage(historyQuery, historyScope, (items) => {
+    setSelectedId((id) => items.some((item) => item.id === id) ? id : items[0]?.id ?? null);
+  });
+  const storage = useStorageStatus();
+  const eventHandlers = useRef({ history: history.event, storage: storage.refresh });
+  eventHandlers.current = { history: history.event, storage: storage.refresh };
 
   useEffect(() => {
     let active = true;
@@ -173,22 +173,6 @@ export function App() {
         clearError('status');
       } catch (error) {
         recordError('status', 'Status unavailable', error);
-      }
-    };
-    const loadHistory = async () => {
-      try {
-        const nextHistory = await getHistory();
-        if (active) {
-          setItems(nextHistory);
-          setSelectedId((id) => nextHistory.some((item) => item.id === id) ? id : nextHistory[0]?.id ?? null);
-        }
-        clearError('history');
-      } catch (error) {
-        if (active && import.meta.env.DEV) {
-          setItems(developmentFallback);
-          setSelectedId((id) => id ?? developmentFallback[0].id);
-        }
-        recordError('history', 'History unavailable', error);
       }
     };
     const loadIntercept = async () => {
@@ -225,13 +209,13 @@ export function App() {
     };
 
     void loadStatus();
-    void loadHistory();
     void loadIntercept();
     void loadConfig();
     void loadResponses();
     const disconnect = connectEvents((event) => {
       const eventType = event.type;
-      if (eventType === 'history.entry.created' || eventType === 'history.entry.updated') void loadHistory();
+      eventHandlers.current.history(eventType);
+      if (eventType === 'storage.status.changed') void eventHandlers.current.storage();
       if (eventType === 'proxy.status.changed') void loadStatus();
       if (eventType.startsWith('intercept.item.') || eventType === 'settings.changed') void loadIntercept();
       if (eventType.startsWith('intercept.response.') || eventType === 'settings.changed') void loadResponses();
@@ -342,6 +326,7 @@ export function App() {
     try {
       const result = await sendRepeaterAPI('default', request);
       setRepeaterResult(result);
+      if (!result.saved) void storage.refresh();
       setAPIErrors((errors) => ({ ...errors, repeater: undefined }));
     } catch (error) {
       setAPIErrors((errors) => ({ ...errors, repeater: `Repeater send failed: ${error instanceof Error ? error.message : 'request failed'}` }));
@@ -385,7 +370,14 @@ export function App() {
 
   return (
     <main className="app-shell">
-      <StatusBar status={status} />
+      <div className="app-status">
+        <StatusBar status={status} />
+        {storage.status?.paused && <div className="storage-warning" role="alert">
+          Capture storage is paused. New traffic is not being saved. Proxy forwarding continues.
+          <button className="quiet-button" type="button" onClick={() => setView('settings')}>Open storage settings</button>
+        </div>}
+        {storage.error && <div className="api-error" role="status">{storage.error}</div>}
+      </div>
       <div className="workspace">
         <nav className="navigation" aria-label="Tools">
           <button className={`nav-item ${view === 'traffic' ? 'active' : ''}`} onClick={() => setView('traffic')} type="button"><Network size={17} />Traffic</button>
@@ -410,7 +402,16 @@ export function App() {
             <label className="search"><Search size={15} /><input onChange={(event) => setHistoryQuery(event.target.value)} placeholder="Filter requests" value={historyQuery} /></label>
             <label className="scope-filter"><span>Scope</span><select aria-label="History scope" onChange={(event) => setHistoryScope(event.target.value as 'all' | 'in' | 'out')} value={historyScope}><option value="all">All</option><option value="in">In</option><option value="out">Out</option></select></label>
           </div>
-          <HistoryTable addingToScope={addingOriginToScope} items={items} selectedId={selectedId} query={historyQuery} scopeFilter={historyScope} onSelect={setSelectedId} onSendToRepeater={(id) => void sendHistoryToRepeater(id)} onAddOriginToScope={(item) => void addOriginToScope(item)} />
+          <div className="history-pagination" aria-label="History pagination">
+            <button className="quiet-button" type="button" disabled={history.loading || history.pageNumber === 1} onClick={history.previous}>Previous</button>
+            <span>Page {history.pageNumber} / {history.items.length} of 100 entries</span>
+            <button className="quiet-button" type="button" disabled={history.loading || !history.nextBeforeId} onClick={history.next}>Next</button>
+            <button className="quiet-button" type="button" aria-label={history.newTraffic ? 'New traffic / Refresh history' : 'Refresh history'} disabled={history.loading} onClick={history.refresh}>{history.newTraffic ? 'New traffic / Refresh' : 'Refresh'}</button>
+          </div>
+          {history.error && <div className="api-error" role="status">{history.error}</div>}
+          {history.loading && <p className="history-message">Loading requests...</p>}
+          {!history.loading && !history.error && history.items.length === 0 && <p className="history-message">No matching requests.</p>}
+          <HistoryTable addingToScope={addingOriginToScope} items={history.items} selectedId={selectedId} onSelect={setSelectedId} onSendToRepeater={(id) => void sendHistoryToRepeater(id)} onAddOriginToScope={(item) => void addOriginToScope(item)} />
         </section>
 
         <section className="inspector-panel" aria-label="Exchange inspector">
@@ -418,7 +419,7 @@ export function App() {
         </section>
 
         <aside className={`utility-panel ${view === 'settings' ? 'settings-utility' : ''}`} aria-label="Utilities">
-          {view === 'settings' ? <Settings status={status} /> : <>
+          {view === 'settings' ? <Settings status={status} storage={storage.status} saving={storage.saving} onSaveStorage={storage.save} /> : <>
             <div className="utility-heading"><FileText size={16} /> Details</div>
             <dl>
               <div><dt>Result</dt><dd className={exchange?.error ? 'error' : 'ok'}>{exchange ? (exchange.error ? 'ERR' : exchange.status) : '-'}</dd></div>

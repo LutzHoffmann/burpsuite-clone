@@ -16,6 +16,46 @@ var migrations = []migration{
 	{version: 3, apply: applyTargetScopeSchema},
 	{version: 4, apply: applyTargetProjectionSchema},
 	{version: 5, apply: applyResponseInterceptSchema},
+	{version: 6, apply: applyCaptureQuotaSchema},
+}
+
+func applyCaptureQuotaSchema(tx *sql.Tx) error {
+	// BLOB casts measure UTF-8 bytes (including embedded NULs), not characters.
+	// Aggregate in SQLite so migrating retained bodies does not load them into Go.
+	_, err := tx.Exec(`
+		ALTER TABLE exchanges ADD COLUMN capture_bytes INTEGER NOT NULL DEFAULT 0 CHECK(capture_bytes >= 0);
+		ALTER TABLE repeater_sends ADD COLUMN capture_bytes INTEGER NOT NULL DEFAULT 0 CHECK(capture_bytes >= 0);
+		UPDATE exchanges SET capture_bytes = 256
+			+ length(CAST(method AS BLOB)) + length(CAST(scheme AS BLOB))
+			+ length(CAST(host AS BLOB)) + length(CAST(path AS BLOB))
+			+ length(CAST(query AS BLOB)) + length(CAST(mime_type AS BLOB))
+			+ length(CAST(error_message AS BLOB)) + length(CAST(tags_json AS BLOB))
+			+ length(CAST(note AS BLOB)) + length(CAST(applied_rule_ids_json AS BLOB))
+			+ COALESCE((SELECT length(CAST(request_headers_json AS BLOB))
+				+ length(CAST(response_headers_json AS BLOB))
+				+ COALESCE(length(request_body), 0) + COALESCE(length(request_raw), 0)
+				+ COALESCE(length(response_body), 0) + COALESCE(length(response_raw), 0)
+				FROM exchange_bodies WHERE exchange_id = exchanges.id), 0);
+		UPDATE repeater_sends SET capture_bytes = 256
+			+ length(CAST(session_id AS BLOB)) + length(CAST(method AS BLOB))
+			+ length(CAST(url AS BLOB)) + length(CAST(request_headers_json AS BLOB))
+			+ length(CAST(request_body AS BLOB)) + length(CAST(response_headers_json AS BLOB))
+			+ length(CAST(response_body AS BLOB)) + length(CAST(content_type AS BLOB));
+		CREATE TABLE capture_quota (
+			revision INTEGER NOT NULL DEFAULT 0 CHECK(revision >= 0),
+			project_id INTEGER PRIMARY KEY REFERENCES projects(id) CHECK(project_id = 1),
+			limit_bytes INTEGER NOT NULL CHECK(limit_bytes > 0 AND limit_bytes <= 1099511627776),
+			used_bytes INTEGER NOT NULL CHECK(used_bytes >= 0),
+			paused INTEGER NOT NULL CHECK(paused IN (0, 1)),
+			skipped_records INTEGER NOT NULL CHECK(skipped_records >= 0)
+		);
+		INSERT INTO capture_quota(project_id, limit_bytes, used_bytes, paused, skipped_records)
+		SELECT 1, 1073741824, used, used >= 1073741824, 0 FROM (
+			SELECT COALESCE((SELECT SUM(capture_bytes) FROM exchanges WHERE project_id = 1), 0)
+			+ COALESCE((SELECT SUM(h.capture_bytes) FROM repeater_sends h JOIN repeater_sessions s
+				ON s.id = h.session_id WHERE s.project_id = 1), 0) AS used
+		);`)
+	return err
 }
 
 func applyResponseInterceptSchema(tx *sql.Tx) error {

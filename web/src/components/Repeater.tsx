@@ -45,6 +45,9 @@ export function Repeater({ initialRequest, result, onSend }: RepeaterProps) {
       <label className="repeater-field">Body <small>Text-safe editing only</small><textarea value={body} onChange={(event) => setBody(event.target.value)} spellCheck={false} /></label>
       <div className="response-heading"><h2>Response</h2>{result && <span className="ok">{result.status}</span>}</div>
       {result ? <>
+        {result.saved === false && <div className="storage-warning" role="alert">
+          Response received, but this exchange was not saved to history. {result.storageWarning || 'Capture storage is paused.'}
+        </div>}
         <dl className="response-meta"><div><dt>Duration</dt><dd>{result.durationMs} ms</dd></div><div><dt>Size</dt><dd>{result.size} B</dd></div></dl>
         <label className="repeater-field">Headers<textarea readOnly value={formatHeaders(result.headers)} /></label>
         <label className="repeater-field">Body<textarea readOnly value={result.body} /></label>

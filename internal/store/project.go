@@ -56,7 +56,33 @@ func (s *SQLiteStore) UpdateExchangeMetadata(ctx context.Context, id int64, tags
 	if err != nil {
 		return fmt.Errorf("marshal exchange tags: %w", err)
 	}
-	result, err := s.db.ExecContext(ctx, `UPDATE exchanges SET tags_json = ?, note = ? WHERE id = ?`, string(tagsJSON), note, id)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin metadata transaction: %w", err)
+	}
+	defer tx.Rollback()
+	// Acquire the database write lock before reading the old metadata charge.
+	if _, err := tx.ExecContext(ctx, `UPDATE capture_quota SET used_bytes = used_bytes WHERE project_id = 1`); err != nil {
+		return fmt.Errorf("lock metadata quota: %w", err)
+	}
+	var oldBytes int64
+	if err := tx.QueryRowContext(ctx, `SELECT length(CAST(tags_json AS BLOB)) + length(CAST(note AS BLOB)) FROM exchanges WHERE id = ? AND project_id = 1`, id).Scan(&oldBytes); err != nil {
+		return fmt.Errorf("read metadata charge: %w", err)
+	}
+	delta := int64(len(tagsJSON)) + int64(len(note)) - oldBytes
+	result, err := tx.ExecContext(ctx, `UPDATE capture_quota SET used_bytes = used_bytes + ?
+		WHERE project_id = 1 AND (? <= 0 OR (paused = 0 AND ? <= limit_bytes - used_bytes))`, delta, delta, delta)
+	if err != nil {
+		return fmt.Errorf("reserve metadata quota: %w", err)
+	}
+	n, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("count metadata reservation: %w", err)
+	}
+	if n == 0 {
+		return ErrCaptureQuotaExceeded
+	}
+	result, err = tx.ExecContext(ctx, `UPDATE exchanges SET tags_json = ?, note = ?, capture_bytes = capture_bytes + ? WHERE id = ? AND project_id = 1`, string(tagsJSON), note, delta, id)
 	if err != nil {
 		return fmt.Errorf("update exchange metadata: %w", err)
 	}
@@ -66,6 +92,9 @@ func (s *SQLiteStore) UpdateExchangeMetadata(ctx context.Context, id int64, tags
 	}
 	if updated == 0 {
 		return sql.ErrNoRows
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit metadata transaction: %w", err)
 	}
 	return nil
 }
@@ -121,6 +150,11 @@ func (s *SQLiteStore) SaveRepeaterSend(ctx context.Context, send *RepeaterSend) 
 		return fmt.Errorf("begin repeater transaction: %w", err)
 	}
 	defer tx.Rollback()
+	charge := CaptureRecordAllowance + captureTextBytes(send.SessionID, send.Method, send.URL,
+		string(requestHeaders), send.RequestBody, string(responseHeaders), send.ResponseBody, send.ContentType)
+	if err := reserveCapture(ctx, tx, charge); err != nil {
+		return err
+	}
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO repeater_sessions (id, project_id, name, created_at_unix_nano, updated_at_unix_nano)
 		VALUES (?, 1, ?, ?, ?)
@@ -133,11 +167,11 @@ func (s *SQLiteStore) SaveRepeaterSend(ctx context.Context, send *RepeaterSend) 
 		INSERT INTO repeater_sends (
 			session_id, method, url, request_headers_json, request_body, status,
 			response_headers_json, response_body, duration_ms, size, truncated,
-			content_type, sent_at_unix_nano
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			content_type, sent_at_unix_nano, capture_bytes
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		send.SessionID, send.Method, send.URL, string(requestHeaders), send.RequestBody,
 		send.Status, string(responseHeaders), send.ResponseBody, send.DurationMS, send.Size,
-		send.Truncated, send.ContentType, send.SentAt.UnixNano(),
+		send.Truncated, send.ContentType, send.SentAt.UnixNano(), charge,
 	)
 	if err != nil {
 		return fmt.Errorf("insert repeater send: %w", err)

@@ -100,9 +100,10 @@ type HistoryItem struct {
 }
 
 type HistoryFilter struct {
-	Search string
-	Method string
-	Host   string
+	Search  string
+	Method  string
+	Host    string
+	InScope *bool
 }
 
 type Store interface {

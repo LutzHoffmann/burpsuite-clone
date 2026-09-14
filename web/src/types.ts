@@ -55,6 +55,8 @@ export interface SendRequest {
 }
 
 export interface SendResult {
+  saved: boolean;
+  storageWarning?: string;
   status: number;
   headers: Record<string, string[]>;
   body: string;

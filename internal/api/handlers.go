@@ -89,14 +89,16 @@ type repeaterAPIRequest struct {
 }
 
 type repeaterAPIResponse struct {
-	Status      int                 `json:"status"`
-	Headers     map[string][]string `json:"headers"`
-	Body        string              `json:"body"`
-	DurationMS  int64               `json:"durationMs"`
-	Size        int64               `json:"size"`
-	Truncated   bool                `json:"truncated"`
-	ContentType string              `json:"contentType"`
-	TextSafe    bool                `json:"textSafe"`
+	Saved          bool                `json:"saved"`
+	StorageWarning string              `json:"storageWarning,omitempty"`
+	Status         int                 `json:"status"`
+	Headers        map[string][]string `json:"headers"`
+	Body           string              `json:"body"`
+	DurationMS     int64               `json:"durationMs"`
+	Size           int64               `json:"size"`
+	Truncated      bool                `json:"truncated"`
+	ContentType    string              `json:"contentType"`
+	TextSafe       bool                `json:"textSafe"`
 }
 
 type interceptItemDTO struct {
@@ -149,22 +151,7 @@ func (s *Server) handleCADownload(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (s *Server) handleHistory(w http.ResponseWriter, r *http.Request) {
-	if s.cfg.Store == nil {
-		http.Error(w, "history store unavailable", http.StatusServiceUnavailable)
-		return
-	}
-	history, err := s.cfg.Store.ListHistory(r.Context(), store.HistoryFilter{
-		Search: r.URL.Query().Get("search"), Method: r.URL.Query().Get("method"), Host: r.URL.Query().Get("host"),
-	})
-	if err != nil {
-		http.Error(w, "list history", http.StatusInternalServerError)
-		return
-	}
-	dtos := make([]historyItemDTO, len(history))
-	for index, item := range history {
-		dtos[index] = toHistoryItemDTO(item)
-	}
-	writeJSON(w, http.StatusOK, dtos)
+	s.writeHistoryPage(w, r, true)
 }
 
 func (s *Server) handleHistoryDetail(w http.ResponseWriter, r *http.Request) {
@@ -191,6 +178,10 @@ func (s *Server) handleHistoryUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := metadataStore.UpdateExchangeMetadata(r.Context(), id, update.Tags, update.Note); err != nil {
+		if errors.Is(err, store.ErrCaptureQuotaExceeded) {
+			http.Error(w, "capture storage budget exceeded; metadata unchanged", http.StatusConflict)
+			return
+		}
 		http.Error(w, "update history", http.StatusInternalServerError)
 		return
 	}
@@ -383,6 +374,8 @@ func (s *Server) handleRepeaterSend(w http.ResponseWriter, r *http.Request) {
 	if textSafe {
 		responseBody = string(result.Body)
 	}
+	saved := false
+	storageWarning := ""
 	if projectStore, ok := s.cfg.Store.(store.ProjectStore); ok {
 		send := &store.RepeaterSend{
 			SessionID: r.PathValue("id"), Method: request.Method, URL: request.URL,
@@ -391,14 +384,25 @@ func (s *Server) handleRepeaterSend(w http.ResponseWriter, r *http.Request) {
 			Size: result.Size, Truncated: result.Truncated, ContentType: result.ContentType, SentAt: time.Now().UTC(),
 		}
 		if err := projectStore.SaveRepeaterSend(r.Context(), send); err != nil {
-			http.Error(w, "persist repeater request", http.StatusInternalServerError)
-			return
+			if !errors.Is(err, store.ErrCaptureQuotaExceeded) {
+				http.Error(w, "persist repeater request", http.StatusInternalServerError)
+				return
+			}
+			storageWarning = "Capture storage paused: this response was received but not saved."
+			if quota, ok := s.cfg.Store.(store.QuotaStore); ok {
+				if status, err := quota.StorageStatus(r.Context()); err == nil {
+					s.cfg.Events.PublishStoragePaused(status.Paused, status.Revision)
+				}
+			}
+		} else {
+			saved = true
 		}
 	}
 	s.cfg.Events.Publish(events.Event{Type: "repeater.send.completed", Data: map[string]interface{}{
 		"sessionId": r.PathValue("id"), "status": result.Status,
 	}})
 	writeJSON(w, http.StatusOK, repeaterAPIResponse{
+		Saved: saved, StorageWarning: storageWarning,
 		Status: result.Status, Headers: result.Headers, Body: responseBody,
 		DurationMS: result.DurationMS, Size: result.Size, Truncated: result.Truncated,
 		ContentType: result.ContentType, TextSafe: textSafe,

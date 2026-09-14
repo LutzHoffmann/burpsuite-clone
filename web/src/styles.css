@@ -15,7 +15,15 @@ button, input { font: inherit; }
 .intercept-request > span { flex: 2; align-self: center; }
 textarea, select { font: inherit; }
 button { color: inherit; }
-.app-shell { min-height: 100vh; display: grid; grid-template-rows: 43px 1fr; }
+.app-shell { min-height: 100vh; display: grid; grid-template-rows: auto 1fr; }
+.app-status .status-bar { min-height: 43px; }
+.storage-warning { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 10px 16px; border-bottom: 1px solid #785829; background: #2d291d; color: #f2ba6c; font-size: 11px; line-height: 1.5; grid-column: 1 / -1; }
+.history-pagination { display: flex; align-items: center; flex-wrap: wrap; gap: 7px; padding: 0 16px 12px; font-size: 10px; color: #899a94; }
+.history-message { padding: 0 16px; font-size: 11px; color: #899a94; }
+.history-pagination button:disabled, .storage-editor button:disabled { opacity: .45; cursor: default; }
+.storage-editor label { display: flex; flex-direction: column; gap: 6px; font-size: 10px; color: #899a94; }
+.storage-editor input { width: 100%; min-width: 0; border: 1px solid #30413c; background: #0d1514; color: #d9e1df; padding: 7px; }
+.storage-editor input[aria-invalid="true"] { border-color: #ec9a88; }
 .status-bar { display: flex; align-items: center; gap: 28px; padding: 0 14px; background: #182321; border-bottom: 1px solid #31413d; font-size: 11px; }
 .brand { display: flex; align-items: center; gap: 7px; color: #eea94b; font-size: 13px; font-weight: 700; letter-spacing: .04em; }
 .status-items { display: flex; align-items: center; gap: 19px; color: #aebbb8; }

@@ -22,7 +22,9 @@ function fixture(config: InterceptConfig = structuredClone(initial)) {
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const path = String(input);
     if (path === '/api/status') return json({ apiAddr: '', proxyAddr: '', caFingerprint: '', caTrust: 'unavailable', httpsInterception: false });
-    if (path === '/api/history' || path === '/api/intercept/queue') return json([]);
+    if (path.startsWith('/api/history/page')) return json({ items: [], nextBeforeId: 0, snapshotId: 0 });
+    if (path === '/api/storage') return json({ limitBytes: 1073741824, usedBytes: 0, paused: false, skippedRecords: 0 });
+    if (path === '/api/intercept/queue') return json([]);
     if (path === '/api/intercept/response-queue') return json(state.queue);
     if (path === '/api/intercept/config') {
       if (init?.method === 'PUT') {

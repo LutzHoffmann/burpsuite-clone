@@ -30,14 +30,32 @@ func (s *memoryStore) SaveExchange(_ context.Context, exchange *Exchange) error 
 	return nil
 }
 
-func (s *memoryStore) ListHistory(_ context.Context, filter HistoryFilter) ([]HistoryItem, error) {
+func (s *memoryStore) ListHistory(ctx context.Context, filter HistoryFilter) ([]HistoryItem, error) {
+	page, err := s.ListHistoryPage(ctx, HistoryPageRequest{Filter: filter})
+	return page.Items, err
+}
+
+func (s *memoryStore) ListHistoryPage(ctx context.Context, request HistoryPageRequest) (HistoryPage, error) {
+	if err := validateHistoryPageRequest(request); err != nil {
+		return HistoryPage{}, err
+	}
+	if err := ctx.Err(); err != nil {
+		return HistoryPage{}, err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	history := make([]HistoryItem, 0)
+	snapshot := request.SnapshotID
+	if snapshot == 0 {
+		snapshot = s.nextID
+	}
+	history := make([]HistoryItem, 0, historyPageSize+1)
 	for index := len(s.exchanges) - 1; index >= 0; index-- {
+		if err := ctx.Err(); err != nil {
+			return HistoryPage{}, err
+		}
 		exchange := s.exchanges[index]
-		if !matchesHistoryFilter(exchange, filter) {
+		if exchange.ID > snapshot || (request.BeforeID > 0 && exchange.ID >= request.BeforeID) || !matchesHistoryFilter(exchange, request.Filter) {
 			continue
 		}
 		history = append(history, HistoryItem{
@@ -61,8 +79,11 @@ func (s *memoryStore) ListHistory(_ context.Context, filter HistoryFilter) ([]Hi
 			ScopeVersion:        exchange.ScopeVersion,
 			ScopeRuleID:         exchange.ScopeRuleID,
 		})
+		if len(history) == historyPageSize+1 {
+			break
+		}
 	}
-	return history, nil
+	return finishHistoryPage(history, snapshot), nil
 }
 
 func (s *memoryStore) GetExchange(_ context.Context, id int64) (*Exchange, error) {
@@ -84,6 +105,9 @@ func (s *memoryStore) Close() error {
 }
 
 func matchesHistoryFilter(exchange Exchange, filter HistoryFilter) bool {
+	if filter.InScope != nil && exchange.InScope != *filter.InScope {
+		return false
+	}
 	if filter.Method != "" && exchange.Method != filter.Method {
 		return false
 	}
@@ -93,5 +117,6 @@ func matchesHistoryFilter(exchange Exchange, filter HistoryFilter) bool {
 	if filter.Search == "" {
 		return true
 	}
-	return strings.Contains(exchange.Host, filter.Search) || strings.Contains(exchange.Path, filter.Search) || strings.Contains(exchange.Query, filter.Search)
+	search := historyASCIILower(filter.Search)
+	return strings.Contains(historyASCIILower(exchange.Host), search) || strings.Contains(historyASCIILower(exchange.Path), search) || strings.Contains(historyASCIILower(exchange.Query), search)
 }

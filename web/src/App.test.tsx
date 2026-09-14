@@ -47,7 +47,15 @@ function strictBaseResponse(input: RequestInfo | URL, init: RequestInit | undefi
   const { path, method } = requestDetails(input, init);
   if (method !== 'GET') return null;
   if (path === '/api/status') return jsonResponse(status);
-  if (path === '/api/history') return jsonResponse(history);
+  if (path === '/api/history/page') {
+    const query = new URL(String(input), 'http://localhost').searchParams;
+    const filtered = history.filter((item) =>
+      (!query.has('search') || [item.host, item.path, item.query].some((value) => value.includes(query.get('search')!)))
+      && (!query.has('inScope') || item.inScope === (query.get('inScope') === 'true')));
+    return jsonResponse({ items: filtered.slice(0, 100), nextBeforeId: 0, snapshotId: Math.max(0, ...history.map((item) => item.id)) });
+  }
+  if (path === '/api/storage') return jsonResponse({ limitBytes: 1073741824, usedBytes: 0, paused: false, skippedRecords: 0 });
+  if (path === '/api/intercept/response-queue') return jsonResponse([]);
   if (path === '/api/intercept/queue') return jsonResponse([]);
   if (path === '/api/intercept/config') return jsonResponse({ enabled: false, rules: [] });
   const match = path.match(/^\/api\/history\/(\d+)$/);
@@ -238,7 +246,7 @@ test('sends a selected history request to repeater through the api', async () =>
     if (path === '/api/repeater/sessions/default/send' && method === 'POST') {
       expect(init?.method).toBe('POST');
       expect(JSON.parse(String(init?.body))).toMatchObject({ method: 'POST', url: 'https://replay.test/submit', body: 'request text' });
-      return jsonResponse({ status: 202, headers: { 'Content-Type': ['text/plain'] }, body: 'real response', durationMs: 9, size: 13, truncated: false, contentType: 'text/plain' });
+      return jsonResponse({ saved: true, status: 202, headers: { 'Content-Type': ['text/plain'] }, body: 'real response', durationMs: 9, size: 13, truncated: false, contentType: 'text/plain' });
     }
     const response = strictBaseResponse(input, init, history);
     if (response) return response;
@@ -263,7 +271,9 @@ test('loads intercept queue and calls edit-forward and drop api actions', async 
   vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const { path, method } = requestDetails(input, init);
     if (path === '/api/status' && method === 'GET') return jsonResponse(statusFixture);
-    if (path === '/api/history' && method === 'GET') return jsonResponse([]);
+    if (path === '/api/history/page' && method === 'GET') return jsonResponse({ items: [], nextBeforeId: 0, snapshotId: 0 });
+    if (path === '/api/storage') return jsonResponse({ limitBytes: 1073741824, usedBytes: 0, paused: false, skippedRecords: 0 });
+    if (path === '/api/intercept/response-queue') return jsonResponse([]);
     if (path === '/api/intercept/queue' && method === 'GET') return jsonResponse(queue);
     if (path === '/api/intercept/config' && method === 'GET') return jsonResponse({ enabled: true, rules: [] });
     if ((path === '/api/intercept/one/forward' || path === '/api/intercept/two/drop') && method === 'POST') {
@@ -297,18 +307,19 @@ test('opens Target and routes endpoint and rebuild events without reloading Hist
   expect(await screen.findByRole('heading', { name: 'Site Map' })).toBeInTheDocument();
   expect(screen.getByRole('region', { name: 'Target workspace' })).toBeInTheDocument();
   expect(screen.queryByRole('main', { name: 'Target workspace' })).not.toBeInTheDocument();
-  const historyLoads = countFetches(fetchMock, '/api/history');
+  await waitFor(() => expect(countFetches(fetchMock, '/api/history/page')).toBe(1));
+  const historyLoads = countFetches(fetchMock, '/api/history/page');
   const treeLoads = countFetches(fetchMock, '/api/target/tree');
   const rebuildLoads = countFetches(fetchMock, '/api/target/rebuild');
 
   socket.emit('target.endpoint.updated');
   await waitFor(() => expect(countFetches(fetchMock, '/api/target/tree')).toBe(treeLoads + 1));
-  expect(countFetches(fetchMock, '/api/history')).toBe(historyLoads);
+  expect(countFetches(fetchMock, '/api/history/page')).toBe(historyLoads);
   expect(countFetches(fetchMock, '/api/target/rebuild')).toBe(rebuildLoads);
 
   socket.emit('target.rebuild.progress');
   await waitFor(() => expect(countFetches(fetchMock, '/api/target/rebuild')).toBe(rebuildLoads + 1));
-  expect(countFetches(fetchMock, '/api/history')).toBe(historyLoads);
+  expect(countFetches(fetchMock, '/api/history/page')).toBe(historyLoads);
   expect(countFetches(fetchMock, '/api/target/tree')).toBe(treeLoads + 1);
 });
 
@@ -320,14 +331,14 @@ test.each(['target.rebuild.progress', 'target.endpoint.updated'])('opens Target 
   render(<App />);
   await screen.findByRole('button', { name: /Select POST target\.test\/from-target/ });
   socket.emit(eventType);
-  expect(countFetches(fetchMock, '/api/history')).toBe(1);
+  expect(countFetches(fetchMock, '/api/history/page')).toBe(1);
 
   fireEvent.click(screen.getByRole('button', { name: 'Target' }));
   expect(await screen.findByRole('treeitem', { name: /^GET \/from-target/ })).toBeInTheDocument();
   expect(countFetches(fetchMock, '/api/scope/rules')).toBe(1);
   expect(countFetches(fetchMock, '/api/target/tree')).toBe(1);
   expect(countFetches(fetchMock, '/api/target/rebuild')).toBe(1);
-  expect(countFetches(fetchMock, '/api/history')).toBe(1);
+  expect(countFetches(fetchMock, '/api/history/page')).toBe(1);
 });
 
 test('opens a Target request in the existing History inspector', async () => {
@@ -363,18 +374,21 @@ test('filters History by text and scope and renders valid sibling row controls',
 
   const query = screen.getByPlaceholderText('Filter requests');
   await user.type(query, 'needle');
-  expect(screen.queryByRole('button', { name: /Select POST target\.test/ })).not.toBeInTheDocument();
-  expect(screen.getByRole('button', { name: /Select GET outside\.test/ })).toBeInTheDocument();
+  await waitFor(() => {
+    expect(screen.queryByRole('button', { name: /Select POST target\.test/ })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Select GET outside\.test/ })).toBeInTheDocument();
+  });
   await user.clear(query);
 
   const scopeFilter = screen.getByRole('combobox', { name: 'History scope' });
   await user.selectOptions(scopeFilter, 'in');
-  expect(screen.getByText('In scope')).toBeInTheDocument();
+  expect(await screen.findByText('In scope')).toBeInTheDocument();
   expect(screen.queryByText('Out of scope')).not.toBeInTheDocument();
   await user.selectOptions(scopeFilter, 'out');
-  expect(screen.getByText('Out of scope')).toBeInTheDocument();
+  expect(await screen.findByText('Out of scope')).toBeInTheDocument();
   expect(screen.queryByText('In scope')).not.toBeInTheDocument();
   await user.selectOptions(scopeFilter, 'all');
+  await screen.findByRole('button', { name: /Select POST target\.test/ });
 
   expect(screen.getByRole('table', { name: 'Request history' }).tagName).toBe('TABLE');
   const headers = screen.getAllByRole('columnheader');

@@ -27,7 +27,15 @@ const jsonRequest = (method: string, value: unknown): RequestInit => ({
 
 export const getStatus = () => api<StatusDTO>('/api/status');
 
-export const getHistory = () => api<HistoryItem[]>('/api/history');
+export interface HistoryPage { items: HistoryItem[]; nextBeforeId: number; snapshotId: number }
+export interface StorageStatus { limitBytes: number; usedBytes: number; paused: boolean; skippedRecords: number }
+export const getHistoryPage = (filters: { beforeId?: number; snapshotId?: number; search?: string; method?: string; host?: string; inScope?: boolean } = {}) => {
+  const query = new URLSearchParams();
+  Object.entries(filters).forEach(([key, value]) => { if (value !== undefined && value !== '' && value !== 0) query.set(key, String(value)); });
+  return api<HistoryPage>(`/api/history/page${query.size ? `?${query}` : ''}`);
+};
+export const getStorage = () => api<StorageStatus>('/api/storage');
+export const updateStorage = (limitBytes: number) => api<StorageStatus>('/api/storage', jsonRequest('PUT', { limitBytes }));
 
 export const caDownloadURL = '/api/ca.pem';
 

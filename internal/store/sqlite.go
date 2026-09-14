@@ -87,19 +87,28 @@ func (s *SQLiteStore) SaveExchange(ctx context.Context, exchange *Exchange) erro
 	}
 	defer tx.Rollback()
 
+	charge := CaptureRecordAllowance + captureTextBytes(exchange.Method, exchange.Scheme,
+		exchange.Host, exchange.Path, exchange.Query, exchange.MIMEType, exchange.ErrorMessage,
+		string(tags), exchange.Note, string(appliedRuleIDs)) + int64(len(requestHeaders)) +
+		int64(len(responseHeaders)) + int64(len(requestBody)) + int64(len(requestRaw)) +
+		int64(len(responseBody)) + int64(len(responseRaw))
+	if err := reserveCapture(ctx, tx, charge); err != nil {
+		return err
+	}
+
 	result, err := tx.ExecContext(ctx, `
 		INSERT INTO exchanges (
 			method, scheme, host, path, query, status, mime_type, request_size, response_size,
 			duration_ms, started_at_unix_nano, intercepted, error, error_message,
 			request_truncated, response_truncated, in_scope, scope_version, scope_rule_id,
-			tags_json, note, applied_rule_ids_json, response_intercepted
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			tags_json, note, applied_rule_ids_json, response_intercepted, capture_bytes
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		exchange.Method, exchange.Scheme, exchange.Host, exchange.Path, exchange.Query,
 		exchange.Status, exchange.MIMEType, exchange.RequestSize, exchange.ResponseSize,
 		exchange.Duration.Milliseconds(), exchange.StartedAt.UnixNano(), exchange.Intercepted,
 		exchange.Error, exchange.ErrorMessage, exchange.RequestTruncated,
 		exchange.ResponseTruncated, exchange.InScope, exchange.ScopeVersion, exchange.ScopeRuleID,
-		string(tags), exchange.Note, string(appliedRuleIDs), exchange.ResponseIntercepted,
+		string(tags), exchange.Note, string(appliedRuleIDs), exchange.ResponseIntercepted, charge,
 	)
 	if err != nil {
 		return fmt.Errorf("insert exchange: %w", err)
@@ -128,61 +137,8 @@ func (s *SQLiteStore) SaveExchange(ctx context.Context, exchange *Exchange) erro
 }
 
 func (s *SQLiteStore) ListHistory(ctx context.Context, filter HistoryFilter) ([]HistoryItem, error) {
-	query := `
-		SELECT id, method, scheme, host, path, query, status, mime_type, request_size,
-			response_size, duration_ms, started_at_unix_nano, intercepted, error,
-			in_scope, scope_version, scope_rule_id, applied_rule_ids_json, response_intercepted
-		FROM exchanges`
-	var conditions []string
-	var args []any
-	if filter.Search != "" {
-		conditions = append(conditions, "(host LIKE ? OR path LIKE ? OR query LIKE ?)")
-		search := "%" + filter.Search + "%"
-		args = append(args, search, search, search)
-	}
-	if filter.Method != "" {
-		conditions = append(conditions, "method = ?")
-		args = append(args, filter.Method)
-	}
-	if filter.Host != "" {
-		conditions = append(conditions, "host = ?")
-		args = append(args, filter.Host)
-	}
-	if len(conditions) > 0 {
-		query += " WHERE " + strings.Join(conditions, " AND ")
-	}
-	query += " ORDER BY id DESC"
-
-	rows, err := s.db.QueryContext(ctx, query, args...)
-	if err != nil {
-		return nil, fmt.Errorf("list history: %w", err)
-	}
-	defer rows.Close()
-
-	items := make([]HistoryItem, 0)
-	for rows.Next() {
-		var item HistoryItem
-		var startedAt int64
-		var appliedRuleIDsJSON string
-		if err := rows.Scan(
-			&item.ID, &item.Method, &item.Scheme, &item.Host, &item.Path, &item.Query,
-			&item.Status, &item.MIMEType, &item.RequestSize, &item.ResponseSize,
-			&item.DurationMS, &startedAt, &item.Intercepted, &item.Error,
-			&item.InScope, &item.ScopeVersion, &item.ScopeRuleID,
-			&appliedRuleIDsJSON, &item.ResponseIntercepted,
-		); err != nil {
-			return nil, fmt.Errorf("scan history item: %w", err)
-		}
-		if err := json.Unmarshal([]byte(appliedRuleIDsJSON), &item.AppliedRuleIDs); err != nil {
-			return nil, fmt.Errorf("unmarshal history applied rule ids: %w", err)
-		}
-		item.StartedAt = time.Unix(0, startedAt).UTC()
-		items = append(items, item)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate history items: %w", err)
-	}
-	return items, nil
+	page, err := s.ListHistoryPage(ctx, HistoryPageRequest{Filter: filter})
+	return page.Items, err
 }
 
 func (s *SQLiteStore) GetExchange(ctx context.Context, id int64) (*Exchange, error) {
