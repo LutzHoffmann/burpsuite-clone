@@ -2,6 +2,8 @@ import { useEffect, useState } from 'react';
 import { getWSConnection, getWSConnections, getWSMessage, getWSMessages } from '../api/client';
 import { useWSPages } from '../api/useWSPages';
 import type { WSConnection, WSMessage, WSMessageDetail } from '../types';
+import { WSRepeater } from './WSRepeater';
+import type { WSLeaveGuard, WSSource } from './WSRepeater';
 
 function Pagination<T>({ label, page }: { label: string; page: ReturnType<typeof useWSPages<T>> }) {
   return <>
@@ -36,7 +38,7 @@ function MessageLabels({ message }: { message: WSMessage }) {
   </span>;
 }
 
-function MessageDetail({ connectionId, id }: { connectionId: number; id: number }) {
+function MessageDetail({ connectionId, id, onUse }: { connectionId: number; id: number; onUse: (connectionId: number, messageId: number) => void }) {
   const [message, setMessage] = useState<WSMessageDetail | null>(null);
   const [error, setError] = useState('');
   useEffect(() => {
@@ -53,11 +55,13 @@ function MessageDetail({ connectionId, id }: { connectionId: number; id: number 
       <p>Payload format: {message.payloadFormat}. Retained prefix only when truncated.</p>
       {message.encoding && !['identity', 'utf-8'].includes(message.encoding) && <p className="ws-notice">Opaque payload: not decoded or decompressed.</p>}
       <pre>{message.payload}</pre>
+      <button className="quiet-button" type="button" disabled={message.direction !== 'client-to-server' || !message.complete || message.truncated || !['text', 'binary'].includes(message.type) || !['identity', 'utf-8'].includes(message.encoding)} onClick={() => onUse(connectionId, id)}>Use in WebSocket Repeater</button>
+      <p className="ws-notice">Only complete, uncompressed client data messages can be transferred. Credentials are not copied.</p>
     </>}
   </section>;
 }
 
-function ConnectionDetail({ id }: { id: number }) {
+function ConnectionDetail({ id, onUse }: { id: number; onUse: (connectionId: number, messageId: number) => void }) {
   const [connection, setConnection] = useState<WSConnection | null>(null);
   const [error, setError] = useState('');
   const [selected, setSelected] = useState<number | null>(null);
@@ -94,16 +98,18 @@ function ConnectionDetail({ id }: { id: number }) {
         <strong>#{message.sequence}</strong><time>{message.observedAt}</time><MessageLabels message={message} />
       </button>)}
     </div>
-    {selected !== null ? <MessageDetail key={selected} connectionId={id} id={selected} /> : <p className="history-message">Select a message to inspect its payload.</p>}
+    {selected !== null ? <MessageDetail key={selected} connectionId={id} id={selected} onUse={onUse} /> : <p className="history-message">Select a message to inspect its payload.</p>}
   </section>;
 }
 
-export function WebSocketsWorkspace() {
+export function WebSocketsWorkspace({ leaveGuard }: { leaveGuard?: WSLeaveGuard }) {
   const page = useWSPages(getWSConnections);
   const [selected, setSelected] = useState<number | null>(null);
+  const [source, setSource] = useState<WSSource>();
+  const useMessage = (connectionId: number, messageId: number) => setSource((current) => ({ connectionId, messageId, revision: (current?.revision ?? 0) + 1 }));
   return <section className="ws-workspace" aria-label="WebSockets workspace">
     <header className="ws-header"><span className="eyebrow">Passive capture</span><h1>WebSockets</h1>
-      <p>WebSocket handshake and messages bypass HTTP interception and replacement. Read-only history; no editing or replay.</p>
+      <p>WebSocket handshake and messages bypass HTTP interception and replacement. History stays read-only; the repeater sends on a separate connection.</p>
       <p>Capture-time scope is labeled; out-of-scope traffic is also recorded. Gaps indicate missing observations, not dropped network bytes.</p>
     </header>
     <section className="ws-connections" aria-label="WebSocket connections">
@@ -115,6 +121,7 @@ export function WebSocketsWorkspace() {
         </button>)}
       </div>
     </section>
-    {selected !== null ? <ConnectionDetail key={selected} id={selected} /> : <p className="history-message">Select a connection to view messages.</p>}
+    {selected !== null ? <ConnectionDetail key={selected} id={selected} onUse={useMessage} /> : <p className="history-message">Select a connection to view messages.</p>}
+    <WSRepeater source={source} leaveGuard={leaveGuard} />
   </section>;
 }

@@ -206,3 +206,20 @@ export interface TargetRefresh {
   sequence: number;
   type: 'initial' | 'scope.changed' | 'target.endpoint.updated' | 'target.rebuild.started' | 'target.rebuild.progress' | 'target.rebuild.completed' | 'target.rebuild.failed';
 }
+
+export interface WSRepeatRequest {
+  url: string;
+  type: 'text' | 'binary';
+  payload: string;
+  payloadFormat: 'text' | 'hex';
+  headers: Record<string, string[]>;
+  subprotocols: string[];
+}
+
+export interface WSRepeatResult {
+  sent: boolean;
+  outcome: string;
+  messages: { type: string; payload: string; payloadFormat: string; size: number; truncated: boolean }[];
+  durationMs: number;
+  subprotocol: string;
+}

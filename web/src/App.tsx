@@ -147,7 +147,12 @@ export function App() {
   const [repeaterRequest, setRepeaterRequest] = useState<SendRequest>(emptyRepeaterRequest);
   const [repeaterResult, setRepeaterResult] = useState<SendResult | null>(null);
   const [apiErrors, setAPIErrors] = useState<Record<string, string | undefined>>({});
-  const [view, setView] = useState<'traffic' | 'target' | 'websockets' | 'settings'>('traffic');
+  const [view, setViewState] = useState<'traffic' | 'target' | 'websockets' | 'settings'>('traffic');
+  const wsLeaveGuard = useRef<() => boolean>(() => true);
+  const setView = (next: typeof view) => {
+    if (view === 'websockets' && next !== view && !wsLeaveGuard.current()) return;
+    setViewState(next);
+  };
   const [historyQuery, setHistoryQuery] = useState('');
   const [historyScope, setHistoryScope] = useState<'all' | 'in' | 'out'>('all');
   const [targetRefresh, setTargetRefresh] = useState<TargetRefresh>({ sequence: 0, type: 'initial' });
@@ -397,7 +402,7 @@ export function App() {
           <button className={`nav-item ${view === 'settings' ? 'active' : ''}`} onClick={() => setView('settings')} type="button"><SlidersHorizontal size={17} />Settings</button>
         </nav>
 
-        {view === 'websockets' ? <WebSocketsWorkspace /> : view === 'target' ? <TargetWorkspace
+        {view === 'websockets' ? <WebSocketsWorkspace leaveGuard={wsLeaveGuard} /> : view === 'target' ? <TargetWorkspace
           refresh={targetRefresh}
           onOpenHistory={(id) => { setSelectedId(id); setView('traffic'); }}
           onSendToRepeater={(id) => { setView('traffic'); void sendHistoryToRepeater(id); }}

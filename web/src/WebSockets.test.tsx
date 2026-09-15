@@ -5,7 +5,7 @@ import { App } from './App';
 
 const events = vi.hoisted(() => ({ receive: (_event: { type: string }) => {} }));
 vi.mock('./api/events', () => ({ connectEvents: (receive: typeof events.receive) => { events.receive = receive; return () => undefined; } }));
-afterEach(() => { cleanup(); vi.useRealTimers(); vi.unstubAllGlobals(); });
+afterEach(() => { cleanup(); vi.useRealTimers(); vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 const json = (value: unknown) => new Response(JSON.stringify(value));
 const connection = (id: number) => ({ id, url: `wss://capture.test/${id}`, inScope: false, state: 'open', openedAt: '2026-09-14T10:00:00Z', closedAt: null, gaps: 2, captureIncomplete: true });
 const message = (id: number, connectionId = 1) => ({ id, connectionId, sequence: id, direction: 'client-to-server', observedAt: '2026-09-14T10:00:01Z', type: 'text', size: 1024, truncated: true, complete: false, encoding: 'opaque' });
@@ -88,6 +88,28 @@ test('capture limit warning survives switching to the WebSockets workspace', asy
  act(() => events.receive({ type: 'websocket.capture.limited' }));
  await open();
  expect(screen.getByText(/Some WebSocket connections were not recorded/)).toBeInTheDocument();
+});
+
+test('eligible history transfer opens editor and guards navigation without changing browser traffic', async () => {
+ const { state, fetchMock } = fixture();
+ state.override = (url) => {
+  if (url.pathname === '/api/websockets/1/messages/101') return Promise.resolve(json({ ...message(101), encoding: 'identity', complete: true, truncated: false, payload: 'hello', payloadFormat: 'text' }));
+  if (url.pathname.endsWith('/draft')) return Promise.resolve(json({ url: 'wss://capture.test/1', type: 'text', payload: 'hello', payloadFormat: 'text', headers: {}, subprotocols: [] }));
+ };
+ render(<App />); await open();
+ fireEvent.click(screen.getByRole('button', { name: 'Select connection 1' })); await act(async () => {});
+ fireEvent.click(screen.getByRole('button', { name: 'Select message 101' })); await act(async () => {});
+ fireEvent.click(screen.getByRole('button', { name: 'Use in WebSocket Repeater' })); await act(async () => {});
+ expect(screen.getByLabelText('Message payload')).toHaveValue('hello');
+ expect(screen.getByLabelText('Handshake headers')).toHaveValue('');
+ expect(fetchMock.mock.calls.some(([input]) => String(input).includes('/websocket-repeater/send'))).toBe(false);
+ const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false);
+ fireEvent.click(screen.getByRole('button', { name: 'Traffic' }));
+ expect(screen.getByLabelText('Message payload')).toHaveValue('hello');
+ expect(confirm).toHaveBeenCalled();
+ confirm.mockReturnValue(true);
+ fireEvent.click(screen.getByRole('button', { name: 'Traffic' }));
+ expect(screen.queryByLabelText('WebSocket repeater')).not.toBeInTheDocument();
 });
 
 test.each([200, 500])('late message loads cannot replace another connection (%s)', async (status) => {

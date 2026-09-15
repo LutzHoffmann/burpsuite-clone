@@ -1,5 +1,6 @@
 import type { Exchange, HistoryItem, InterceptConfig, InterceptItem, RebuildStatus, ScopeRule, ScopeState, SendRequest, SendResult, StatusDTO, TargetEndpoint, TargetParameter, TargetRequestRef, TargetTreeNode } from '../types';
 import type { WSConnection, WSCursor, WSMessage, WSMessageDetail, WSPage } from '../types';
+import type { WSRepeatRequest, WSRepeatResult } from '../types';
 
 export class ApiError extends Error {
   constructor(public readonly status: number, statusText: string) {
@@ -38,6 +39,10 @@ export const getWSConnections = (cursor: WSCursor = {}) => api<WSPage<WSConnecti
 export const getWSConnection = (id: number) => api<WSConnection>(`/api/websockets/${id}`);
 export const getWSMessages = (id: number, cursor: WSCursor = {}) => api<WSPage<WSMessage>>(`/api/websockets/${id}/messages${wsQuery(cursor)}`);
 export const getWSMessage = (id: number, messageId: number) => api<WSMessageDetail>(`/api/websockets/${id}/messages/${messageId}`);
+export const getWSRepeaterDraft = (id: number, messageId: number, signal?: AbortSignal) =>
+  api<WSRepeatRequest>(`/api/websockets/${id}/messages/${messageId}/draft`, { signal, cache: 'no-store' });
+export const sendWSRepeater = (request: WSRepeatRequest, signal: AbortSignal) =>
+  api<WSRepeatResult>('/api/websocket-repeater/send', { ...jsonRequest('POST', request), signal, cache: 'no-store' });
 
 export interface HistoryPage { items: HistoryItem[]; nextBeforeId: number; snapshotId: number }
 export interface StorageStatus { limitBytes: number; usedBytes: number; paused: boolean; skippedRecords: number }

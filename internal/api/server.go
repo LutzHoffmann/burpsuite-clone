@@ -12,6 +12,7 @@ import (
 	"github.com/lutzifer/burpsuite-clone/internal/repeater"
 	"github.com/lutzifer/burpsuite-clone/internal/store"
 	"github.com/lutzifer/burpsuite-clone/internal/target"
+	"github.com/lutzifer/burpsuite-clone/internal/wsrepeater"
 )
 
 type Config struct {
@@ -19,6 +20,7 @@ type Config struct {
 	Authority    *certs.Authority
 	Events       *events.Hub
 	Repeater     *repeater.Service
+	WSRepeater   *wsrepeater.Service
 	APIAddr      string
 	ProxyAddr    string
 	Intercept    *intercept.Controller
@@ -48,6 +50,8 @@ func NewServer(cfg Config) *Server {
 	srv.mux.HandleFunc("GET /api/websockets/{id}", srv.handleWSConnection)
 	srv.mux.HandleFunc("GET /api/websockets/{id}/messages", srv.handleWSMessages)
 	srv.mux.HandleFunc("GET /api/websockets/{id}/messages/{messageId}", srv.handleWSMessage)
+	srv.mux.HandleFunc("GET /api/websockets/{id}/messages/{messageId}/draft", srv.handleWSRepeaterDraft)
+	srv.mux.HandleFunc("POST /api/websocket-repeater/send", srv.handleWSRepeaterSend)
 	srv.mux.HandleFunc("GET /api/storage", srv.handleStorage)
 	srv.mux.HandleFunc("PUT /api/storage", srv.handleStorageUpdate)
 	srv.mux.HandleFunc("GET /api/history/{id}", srv.handleHistoryDetail)

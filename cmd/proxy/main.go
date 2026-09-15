@@ -21,6 +21,7 @@ import (
 	"github.com/lutzifer/burpsuite-clone/internal/scope"
 	"github.com/lutzifer/burpsuite-clone/internal/store"
 	"github.com/lutzifer/burpsuite-clone/internal/target"
+	"github.com/lutzifer/burpsuite-clone/internal/wsrepeater"
 )
 
 func main() {
@@ -93,6 +94,7 @@ func main() {
 		Authority:    authority,
 		Events:       hub,
 		Repeater:     repeater.NewService(nil, cfg.BodyLimitBytes),
+		WSRepeater:   wsrepeater.NewService(scopeManager, cfg.BodyLimitBytes),
 		APIAddr:      cfg.APIAddr,
 		ProxyAddr:    cfg.ProxyAddr,
 		Intercept:    interceptController,

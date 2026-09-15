@@ -192,4 +192,10 @@ func TestWebSocketQuotaGapsAndResumeOnOpenConnection(t *testing.T) {
 	if messages.Items[0].Sequence != 4 || messages.Items[1].Sequence != 3 {
 		t.Fatalf("gap sequence: %+v", messages)
 	}
+	// Drain async connection finalization before the harness closes/removes SQLite.
+	_ = c.Close()
+	wait(func() bool {
+		h.json("GET", fmt.Sprintf("/api/websockets/%d", id), nil, 200, &connection)
+		return connection.State != "open"
+	})
 }
