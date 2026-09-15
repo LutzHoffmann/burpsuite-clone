@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import type { InterceptItem } from '../types';
 
 type InterceptPanelProps = {
@@ -34,14 +34,6 @@ function InterceptEditor({ item, onForward, onDrop, phase }: Pick<InterceptPanel
   const [url, setURL] = useState(item.url);
   const [headers, setHeaders] = useState(formatHeaders(item.headers));
   const [body, setBody] = useState(item.body);
-
-  useEffect(() => {
-    setMethod(item.method);
-    setURL(item.url);
-    setHeaders(formatHeaders(item.headers));
-    setBody(item.body);
-    setStatusCode(String(item.statusCode ?? 200));
-  }, [item.id]);
 
   const act = async (drop: boolean) => {
     if (pending) return;

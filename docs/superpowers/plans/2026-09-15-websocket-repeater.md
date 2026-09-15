@@ -45,7 +45,7 @@ API Config adds WSRepeater *wsrepeater.Service; main wires current shared scope 
 - [x] Integration: test actual API send against local ws and service-level wss, strict scope and no
   capture/credential persistence. Review spec compliance and code quality.
 - [x] Documentation: update docs/setup/websockets.md and README with one-shot limits.
-- [x] Local verification: full Go race suite, go vet, Windows build, 104 frontend
+- [x] Local verification: full Go race suite, go vet, Windows build, 108 frontend
   tests and production build, diff check. Desktop browser smoke test verified the
   editor and scope denial. No mobile visual smoke test performed.
 - [ ] Commit and push existing branch; update existing draft PR, watch CI; no merge.
@@ -62,3 +62,9 @@ unterminated, cancellation and TLS tests pass. Reviewer approved the final fix.
 An existing quota integration test now waits for async connection finalization
 before deleting SQLite; it failed twice in 10 runs before the fix and passed
 10 race-enabled runs afterward. Full Go race suite passed after integration.
+
+First GitHub run passed backend/Windows but exposed an existing HTTP response
+editor race: the mount effect could reset the first user edit. Removed the
+redundant reset (editors already remount by queue ID). Four focused tests cover
+early status/body/header edits and same-ID refresh/new-ID initialization; three
+fail with the old code and pass after the fix. Independent review approved it.
