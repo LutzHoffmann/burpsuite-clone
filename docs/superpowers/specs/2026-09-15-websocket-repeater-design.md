@@ -64,7 +64,8 @@ in passive history or covered by the persistent capture budget. Navigation may
 discard the editor/results with a warning for pending edits. Credentials are not
 stored in localStorage, project settings, logs, or automatic history records.
 Explicit session persistence, live interception, compressed capture decoding,
-multi-message scripts, and browser-socket injection are follow-up work.
+and multi-message scripts are follow-up work. Browser-socket injection is an
+explicit non-goal of this repeater and must not be added as an implicit extension.
 
 ## Implementation and Verification
 
