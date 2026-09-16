@@ -37,11 +37,28 @@ Closing cannot undo previous sends. A fresh connection requires another Connect.
 - Connect has a 15-second deadline; each manual write has a five-second deadline.
   Concurrent sends on one session are rejected, not queued. The reader runs
   independently so unsolicited server messages remain visible.
+- An indeterminate, partial, timed-out or canceled network write terminally closes
+  the session. Return send_failed with delivery unknown; never append that attempt
+  as a successfully written outgoing record. Retain only bounded failure metadata
+  in terminal state, not its payload. Validation/busy rejection before writing
+  leaves the session usable. The UI does not resubmit a failed attempt.
+- Explicit operator close permits at most one second for a close control frame,
+  then forcibly closes the socket. Revocation, expiry, errors and shutdown force
+  closure without waiting for an application-writer lock. Automatic pong/close
+  writes use the library's concurrency-safe control writer with a deadline of at
+  most one second; failure closes the session. Release capacity exactly once
+  after socket closure, then join the bounded reader/writer work during cleanup.
 - Retain a ring of at most 256 message records and 1 MiB of decoded payload per
   session. Evictions increment an explicit gap count and retain monotonic sequence
   numbers. The UI applies the same limits to its displayed log, including a visible
   local-eviction count. Hex/string/JSON overhead is outside the decoded-byte budget
   but remains bounded by the record and payload limits.
+- The 3 MiB API envelope is an incoming request cap. Poll responses have a separate
+  8 MiB encoded cap: at most 100 records containing at most 1 MiB decoded payload
+  (at worst 6 MiB after JSON escaping), fixed bounded metadata, one URL capped at
+  64 KiB and subprotocol metadata capped at 4 KiB. Do not include arbitrary peer
+  close/error strings. This admits a single worst-case record without truncating
+  it or stalling the cursor. Test worst-case escaping against the encoded cap.
 - Keep the existing per-message min(configured body limit, 1 MiB) cap, strict
   text/hex validation, 16 KiB combined operator-header/subprotocol budget, 3 MiB
   API envelope, 64 KiB upstream handshake-header cap and verified TLS. No compression,
@@ -65,7 +82,7 @@ only on UI events or a lossy event stream for revocation.
 Use cryptographically random session IDs with at least 128 bits of entropy, held
 only in the initiating UI's memory. Do not expose a global session-list endpoint.
 Apply the existing loopback Host and same-origin protections to every endpoint,
-including polling. Session IDs, handshake credentials and payloads must not be
+  including polling. Session IDs, handshake credentials and payloads must not be
 logged or persisted. This does not introduce account authentication: the existing
 trusted-local-machine threat model still applies.
 
