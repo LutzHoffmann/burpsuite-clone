@@ -8,7 +8,10 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"os"
+	"os/signal"
 	"path/filepath"
+	"syscall"
 	"time"
 
 	"github.com/lutzifer/burpsuite-clone/internal/api"
@@ -89,12 +92,15 @@ func main() {
 		}
 	}()
 
+	wsSessions := wsrepeater.NewSessionManager(scopeManager, cfg.BodyLimitBytes)
+	defer wsSessions.Close()
 	apiServer := api.NewServer(api.Config{
 		Store:        history,
 		Authority:    authority,
 		Events:       hub,
 		Repeater:     repeater.NewService(nil, cfg.BodyLimitBytes),
 		WSRepeater:   wsrepeater.NewService(scopeManager, cfg.BodyLimitBytes),
+		WSSessions:   wsSessions,
 		APIAddr:      cfg.APIAddr,
 		ProxyAddr:    cfg.ProxyAddr,
 		Intercept:    interceptController,
@@ -106,7 +112,20 @@ func main() {
 		ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 30 * time.Second,
 		WriteTimeout: 2 * time.Minute, IdleTimeout: 2 * time.Minute,
 	}
+	shutdown, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	serverDone := make(chan struct{})
+	defer close(serverDone)
+	go func() {
+		select {
+		case <-shutdown.Done():
+			wsSessions.Close()
+			_ = httpServer.Close()
+		case <-serverDone:
+		}
+	}()
 	if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		wsSessions.Close()
 		log.Fatal(err)
 	}
 }

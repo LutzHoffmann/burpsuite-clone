@@ -21,6 +21,7 @@ type Config struct {
 	Events       *events.Hub
 	Repeater     *repeater.Service
 	WSRepeater   *wsrepeater.Service
+	WSSessions   WSSessionService
 	APIAddr      string
 	ProxyAddr    string
 	Intercept    *intercept.Controller
@@ -52,6 +53,11 @@ func NewServer(cfg Config) *Server {
 	srv.mux.HandleFunc("GET /api/websockets/{id}/messages/{messageId}", srv.handleWSMessage)
 	srv.mux.HandleFunc("GET /api/websockets/{id}/messages/{messageId}/draft", srv.handleWSRepeaterDraft)
 	srv.mux.HandleFunc("POST /api/websocket-repeater/send", srv.handleWSRepeaterSend)
+	srv.mux.HandleFunc("POST /api/websocket-repeater/sessions", srv.handleWSSessionConnect)
+	srv.mux.HandleFunc("GET /api/websocket-repeater/sessions/{id}", srv.handleWSSessionPoll)
+	srv.mux.HandleFunc("POST /api/websocket-repeater/sessions/{id}/send", srv.handleWSSessionSend)
+	srv.mux.HandleFunc("POST /api/websocket-repeater/sessions/{id}/close", srv.handleWSSessionClose)
+	srv.mux.HandleFunc("DELETE /api/websocket-repeater/sessions/{id}", srv.handleWSSessionDispose)
 	srv.mux.HandleFunc("GET /api/storage", srv.handleStorage)
 	srv.mux.HandleFunc("PUT /api/storage", srv.handleStorageUpdate)
 	srv.mux.HandleFunc("GET /api/history/{id}", srv.handleHistoryDetail)

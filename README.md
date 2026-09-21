@@ -9,7 +9,9 @@ ordered regex/literal replacements, history, inspection, Repeater, Target Scope,
 Site Map, passive WebSocket history, and local project storage.
 
 WebSocket forwarding supports `ws://` and `wss://`, with a read-only message
-inspector and an independent one-shot WebSocket Repeater. Complete, uncompressed
+inspector and an independent WebSocket Repeater with one-shot and manual session
+modes. Session mode keeps one connection open for multiple sends and unsolicited
+incoming messages. Complete, uncompressed
 client messages can be copied into its text/hex editor and sent to currently
 in-scope targets. See [WebSocket history and repeater](docs/setup/websockets.md)
 for capture limits, explicit credentials, and the HTTP-interception bypass.

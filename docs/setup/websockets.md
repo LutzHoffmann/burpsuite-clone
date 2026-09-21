@@ -97,8 +97,8 @@ Upstream handshake response headers are capped at 64 KiB before HTTP parsing,
 including after TLS decryption for `wss://`. Oversized or unterminated headers
 cannot consume unbounded memory while waiting for the overall deadline.
 
-Protocols requiring multiple login messages or persistent sessions are not yet
-supported. This repeater has no automatic cookie/session management or saved runs.
+For protocols requiring multiple manual login messages, use Session mode below.
+Neither mode has automatic cookie/session management or saved runs.
 
 ### Repeater API
 
@@ -113,3 +113,66 @@ Preflight failures use 400 (invalid input), 403 (out of scope), 429 (busy), or 5
 `window_complete`, `timeout`, `handshake_error`, `tls_error`, `size_limit`, or
 `message_limit`, preserving bounded partial received messages. Raw network errors
 and credential-bearing request data are not echoed in errors.
+
+## Manual Sessions
+
+Choose **Session** in the repeater and explicitly connect. Connect sends no
+application message. URL, handshake headers and subprotocols stay locked while
+connected; edit the message and send once per click on the same socket. Incoming
+messages appear continuously, including unsolicited traffic. The log shows both
+directions in observation order, not request/reply correlation. Text is rendered
+as text, never executable HTML.
+
+Close explicitly when finished. Leaving the workspace, replacing a draft or
+changing mode asks for confirmation and makes a best-effort close. A canceled or
+failed write may already have partly reached the peer: it closes the connection,
+reports unknown delivery and is never automatically retried. A successful write
+does not prove application acceptance. Preflight validation errors leave the
+connection usable.
+
+Current scope is checked before and after the handshake, before every send, and
+at least once a second while connected. Removing a target from scope closes even
+a silent session; already in-flight writes cannot be recalled. Sessions retain
+verified TLS, disabled compression and the one-shot handshake/input limits.
+
+### Session Limits
+
+- Four connecting/active sessions globally, separate from four one-shot sends.
+  Busy sessions reject concurrent sends instead of queueing them.
+- Connect deadline 15 seconds; write deadline five seconds. Operator close has
+  at most one second for its control frame before forcing the socket closed.
+- Five minutes without a successful manual send, or 30 minutes total lifetime,
+  closes the session. Incoming messages and polling do not reset operator idle.
+- The UI polls every second. A successful poll renews a 30-second lease; losing
+  the tab/network or background-tab throttling can expire the connection.
+- Server and UI logs retain at most 256 records and 1 MiB decoded payload, with
+  visible eviction counts. Oversized incoming messages retain a truncated prefix
+  and close the connection; interrupted partial messages are marked incomplete.
+- Poll pages contain at most 100 records with an 8 MiB encoded response cap. The
+  incoming JSON cap remains 3 MiB, including escaping and metadata.
+- At most four terminal records remain for 60 seconds; they do not consume active
+  slots. Explicit disposal removes a record immediately.
+
+IDs, credentials and logs live only in memory, not localStorage, SQLite or passive
+history. There is no session list, reconnect, automatic login sequence or browser
+socket injection. Restarting the application/browser does not restore sessions.
+
+### Session API
+
+- `POST /api/websocket-repeater/sessions`: `{url, headers, subprotocols}`.
+- `POST /api/websocket-repeater/sessions/{id}/send`:
+  `{type, payload, payloadFormat}`.
+- `GET /api/websocket-repeater/sessions/{id}?afterSequence=N`: state, reason,
+  messages, oldest/latest sequence, `nextSequence` cursor and `droppedMessages`.
+  Pass `nextSequence` as the next poll's `afterSequence`.
+- `POST /api/websocket-repeater/sessions/{id}/close`: empty body, idempotent close
+  while the terminal record remains available.
+- `DELETE /api/websocket-repeater/sessions/{id}`: empty body, close and dispose;
+  returns 204. Missing or expired IDs return 404.
+
+All routes are no-store and apply the loopback/same-origin checks, including GET.
+Invalid input returns 400, excluded targets 403, busy/closed sends 409 and exhausted
+connection capacity 429. Network failures use bounded terminal reasons, not raw
+peer errors. A `send_failed` reason means delivery is unknown. Session IDs are
+unpredictable bearer references for the trusted-local-machine model, not account
+authentication.

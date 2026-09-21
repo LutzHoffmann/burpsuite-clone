@@ -223,3 +223,28 @@ export interface WSRepeatResult {
   durationMs: number;
   subprotocol: string;
 }
+
+export interface WSSessionMessage {
+  sequence: number;
+  direction: 'client-to-server' | 'server-to-client';
+  timestamp: string;
+  type: string;
+  payload: string;
+  payloadFormat: 'text' | 'hex';
+  size: number;
+  truncated: boolean;
+  complete: boolean;
+}
+
+export interface WSSessionSnapshot {
+  id: string;
+  url: string;
+  state: 'connected' | 'closing' | 'closed';
+  reason: string;
+  subprotocol: string;
+  messages: WSSessionMessage[];
+  oldestSequence: number;
+  latestSequence: number;
+  nextSequence: number;
+  droppedMessages: number;
+}

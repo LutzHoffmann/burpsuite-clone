@@ -15,6 +15,9 @@ import (
 
 func (s *Server) validateRequest(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/websocket-repeater/sessions" || strings.HasPrefix(r.URL.Path, "/api/websocket-repeater/sessions/") {
+			w.Header().Set("Cache-Control", "no-store")
+		}
 		if !s.allowedHost(r.Host) {
 			http.Error(w, "untrusted Host header", http.StatusMisdirectedRequest)
 			return

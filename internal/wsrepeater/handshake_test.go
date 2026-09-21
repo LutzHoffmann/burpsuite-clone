@@ -2,12 +2,16 @@ package wsrepeater
 
 import (
 	"bytes"
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"io"
 	"net"
+	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestHandshakeBoundPreservesBufferedAndSubsequentBytes(t *testing.T) {
@@ -27,6 +31,36 @@ func TestHandshakeBoundPreservesBufferedAndSubsequentBytes(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestHandshakeTransportCloseDoesNotWaitForTLSCloseNotify(t *testing.T) {
+	fixture := httptest.NewTLSServer(nil)
+	defer fixture.Close()
+	roots := x509.NewCertPool()
+	roots.AddCert(fixture.Certificate())
+	left, right := net.Pipe()
+	defer left.Close()
+	defer right.Close()
+	server := tls.Server(right, &tls.Config{Certificates: fixture.TLS.Certificates, MaxVersion: tls.VersionTLS12})
+	client := tls.Client(left, &tls.Config{RootCAs: roots, ServerName: "example.com", MaxVersion: tls.VersionTLS12})
+	handshaken := make(chan error, 1)
+	go func() { handshaken <- server.Handshake() }()
+	if e := client.Handshake(); e != nil {
+		t.Fatal(e)
+	}
+	if e := <-handshaken; e != nil {
+		t.Fatal(e)
+	}
+	bounded := &handshakeConn{Conn: client, done: true}
+	closed := make(chan struct{})
+	go func() { _ = bounded.Close(); close(closed) }()
+	select {
+	case <-closed:
+	case <-time.After(100 * time.Millisecond):
+		_ = left.Close()
+		<-closed
+		t.Fatal("forced close waited for TLS close notification")
 	}
 }
 

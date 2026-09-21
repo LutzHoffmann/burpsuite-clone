@@ -3,15 +3,12 @@ package wsrepeater
 
 import (
 	"context"
-	"crypto/tls"
 	"crypto/x509"
 	"encoding/hex"
 	"errors"
 	"io"
 	"net"
-	"net/http"
 	"net/url"
-	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -221,52 +218,6 @@ func (s *Service) Send(parent context.Context, r Request) (result Result, err er
 	ctx, cancel := context.WithTimeout(parent, s.overallTimeout)
 	defer cancel()
 	p, _ := payload(r, s.bodyLimit)
-	headers := http.Header{}
-	for k, values := range r.Headers {
-		headers[http.CanonicalHeaderKey(k)] = append([]string(nil), values...)
-	}
-	dialer := websocket.Dialer{HandshakeTimeout: s.overallTimeout, Subprotocols: append([]string(nil), r.Subprotocols...), TLSClientConfig: &tls.Config{RootCAs: s.roots, MinVersion: tls.VersionTLS12}}
-	// Closing the transport also interrupts a server stalled mid-handshake.
-	var stop func() bool
-	dialTCP := func(dialCtx context.Context, network, address string) (net.Conn, error) {
-		c, e := (&net.Dialer{}).DialContext(dialCtx, network, address)
-		if e == nil {
-			stop = context.AfterFunc(ctx, func() { _ = c.Close() })
-		}
-		return c, e
-	}
-	dialer.NetDialContext = func(dialCtx context.Context, network, address string) (net.Conn, error) {
-		c, e := dialTCP(dialCtx, network, address)
-		if e != nil {
-			return nil, e
-		}
-		return &handshakeConn{Conn: c, remaining: maxHandshakeBytes}, nil
-	}
-	defer func() {
-		if stop != nil {
-			stop()
-		}
-	}()
-	tlsFailed := false
-	// Bound decrypted HTTP header bytes, not TLS records or certificate traffic.
-	dialer.NetDialTLSContext = func(dialCtx context.Context, network, address string) (net.Conn, error) {
-		raw, e := dialTCP(dialCtx, network, address)
-		if e != nil {
-			return nil, e
-		}
-		host, _, e := net.SplitHostPort(address)
-		if e != nil {
-			_ = raw.Close()
-			return nil, e
-		}
-		secured := tls.Client(raw, &tls.Config{RootCAs: s.roots, ServerName: host, MinVersion: tls.VersionTLS12})
-		if e = secured.HandshakeContext(dialCtx); e != nil {
-			tlsFailed = true
-			_ = secured.Close()
-			return nil, e
-		}
-		return &handshakeConn{Conn: secured, remaining: maxHandshakeBytes}, nil
-	}
 	u, _ := url.Parse(r.URL)
 	scheme := "http"
 	if u.Scheme == "wss" {
@@ -279,26 +230,13 @@ func (s *Service) Send(parent context.Context, r Request) (result Result, err er
 	if rules == nil || !rules.Classify(scope.Target{Scheme: scheme, Host: u.Host, Path: u.Path}).InScope {
 		return result, ErrOutOfScope
 	}
-	c, response, e := dialer.DialContext(ctx, r.URL, headers)
-	if e != nil {
-		if response != nil && response.Body != nil {
-			_ = response.Body.Close()
-		}
-		result.Outcome = networkOutcome(ctx, e, "handshake_error")
-		if result.Outcome == "handshake_error" && tlsFailed {
-			result.Outcome = "tls_error"
-		}
+	c, detach, reason := dialWebSocket(ctx, ConnectRequest{URL: r.URL, Headers: r.Headers, Subprotocols: r.Subprotocols}, s.roots, s.overallTimeout)
+	defer detach()
+	if reason != "" {
+		result.Outcome = reason
 		return result, nil
 	}
 	defer c.Close()
-	// Gorilla accepts unoffered protocols and can enable unsolicited compression.
-	// Validate all response fields before writing any application data.
-	selected := response.Header.Values("Sec-WebSocket-Protocol")
-	if len(response.Header.Values("Sec-WebSocket-Extensions")) != 0 || len(selected) > 1 ||
-		(len(selected) == 1 && (!httpguts.ValidHeaderFieldName(selected[0]) || !slices.Contains(r.Subprotocols, selected[0]))) {
-		result.Outcome = "handshake_error"
-		return result, nil
-	}
 	result.Subprotocol = c.Subprotocol()
 	deadline, _ := ctx.Deadline()
 	_ = c.SetWriteDeadline(deadline)
@@ -306,7 +244,7 @@ func (s *Service) Send(parent context.Context, r Request) (result Result, err er
 	if r.Type == "binary" {
 		mt = websocket.BinaryMessage
 	}
-	if e = c.WriteMessage(mt, p); e != nil {
+	if e := c.WriteMessage(mt, p); e != nil {
 		result.Outcome = networkOutcome(ctx, e, "write_error")
 		return result, nil
 	}
