@@ -467,15 +467,19 @@ func TestSessionTerminalSnapshotWaitsForLastWriter(t *testing.T) {
 
 type gatedSessionConn struct {
 	net.Conn
-	readGate         bool
+	readGate         atomic.Bool
 	writeGate        atomic.Bool
 	entered, release chan struct{}
-	once             sync.Once
+	readStarted      chan struct{}
+	once, readOnce   sync.Once
 }
 
 func (c *gatedSessionConn) Read(p []byte) (int, error) {
 	n, err := c.Conn.Read(p)
-	if err != nil && c.readGate {
+	if c.readGate.Load() && n > 0 {
+		c.readOnce.Do(func() { close(c.readStarted) })
+	}
+	if err != nil && c.readGate.Load() {
 		c.once.Do(func() { close(c.entered); <-c.release })
 	}
 	return n, err
@@ -495,8 +499,10 @@ func TestSessionFinalRecordsSurviveConcurrentClose(t *testing.T) {
 		t.Run(mode, func(t *testing.T) {
 			peerDone := make(chan struct{})
 			peerWritten := make(chan struct{})
+			sendPartial := make(chan struct{})
 			server := wsServer(t, func(c *websocket.Conn, _ *http.Request) {
 				if mode == "partial read" {
+					<-sendPartial
 					_, _ = c.UnderlyingConn().Write([]byte{0x82, 10, 'a', 'b'})
 					close(peerWritten)
 					<-peerDone
@@ -511,7 +517,7 @@ func TestSessionFinalRecordsSurviveConcurrentClose(t *testing.T) {
 				if err != nil {
 					return nil, err
 				}
-				transport = &gatedSessionConn{Conn: conn, readGate: mode == "partial read", entered: make(chan struct{}), release: make(chan struct{})}
+				transport = &gatedSessionConn{Conn: conn, entered: make(chan struct{}), release: make(chan struct{}), readStarted: make(chan struct{})}
 				return transport, nil
 			}}
 			conn, _, err := dialer.Dial(wsURL(server), nil)
@@ -531,10 +537,17 @@ func TestSessionFinalRecordsSurviveConcurrentClose(t *testing.T) {
 			m.work.Add(1)
 			s.work.Add(1)
 			m.mu.Unlock()
-			if mode == "partial read" {
-				<-peerWritten
-			}
 			go m.read(s)
+			if mode == "partial read" {
+				transport.readGate.Store(true)
+				close(sendPartial)
+				<-peerWritten
+				select {
+				case <-transport.readStarted:
+				case <-time.After(2 * time.Second):
+					t.Fatal("reader did not consume partial frame bytes")
+				}
+			}
 			result := make(chan SessionSnapshot, 1)
 			if mode == "partial read" {
 				go func() { snapshot, _ := m.CloseSession(s.id); result <- snapshot }()
