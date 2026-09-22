@@ -18,6 +18,97 @@ var migrations = []migration{
 	{version: 5, apply: applyResponseInterceptSchema},
 	{version: 6, apply: applyCaptureQuotaSchema},
 	{version: 7, apply: applyWebSocketSchema},
+	{version: 8, apply: applyIntruderSchema},
+}
+
+func applyIntruderSchema(tx *sql.Tx) error {
+	_, err := tx.Exec(`
+CREATE TABLE intruder_jobs (
+ id TEXT PRIMARY KEY CHECK(length(CAST(id AS BLOB)) BETWEEN 1 AND 128),
+ project_id INTEGER NOT NULL REFERENCES projects(id),
+ attack TEXT NOT NULL CHECK(attack IN ('sniper','battering_ram','pitchfork','cluster_bomb')),
+ state TEXT NOT NULL CHECK(state IN ('draft','running','pausing','paused','aborting','aborted','completed','failed')),
+ state_reason TEXT NOT NULL CHECK(length(CAST(state_reason AS BLOB)) <= 1024),
+ revision INTEGER NOT NULL CHECK(revision >= 1),
+ method TEXT NOT NULL CHECK(length(CAST(method AS BLOB)) BETWEEN 1 AND 32),
+ url TEXT NOT NULL CHECK(length(CAST(url AS BLOB)) BETWEEN 1 AND 65536),
+ template_raw BLOB NOT NULL CHECK(length(template_raw) <= 2097152),
+ request_limit INTEGER NOT NULL CHECK(request_limit BETWEEN 1 AND 100000),
+ concurrency INTEGER NOT NULL CHECK(concurrency BETWEEN 1 AND 20),
+ rate_micros INTEGER NOT NULL CHECK(rate_micros BETWEEN 100000 AND 100000000),
+ timeout_ms INTEGER NOT NULL CHECK(timeout_ms BETWEEN 1000 AND 120000),
+ total_requests INTEGER NOT NULL CHECK(total_requests BETWEEN 1 AND 100000),
+ next_sequence INTEGER NOT NULL CHECK(next_sequence BETWEEN 0 AND total_requests),
+ completed_count INTEGER NOT NULL CHECK(completed_count BETWEEN 0 AND total_requests),
+ error_count INTEGER NOT NULL CHECK(error_count BETWEEN 0 AND completed_count),
+ scope_version INTEGER NOT NULL CHECK(scope_version >= 0),
+ baseline_sequence INTEGER,
+ created_at_unix_nano INTEGER NOT NULL,
+ updated_at_unix_nano INTEGER NOT NULL
+);
+CREATE INDEX intruder_jobs_project_updated ON intruder_jobs(project_id, updated_at_unix_nano DESC);
+CREATE INDEX intruder_jobs_project_state ON intruder_jobs(project_id, state);
+
+CREATE TABLE intruder_payload_sets (
+ job_id TEXT NOT NULL REFERENCES intruder_jobs(id) ON DELETE CASCADE,
+ id TEXT NOT NULL CHECK(length(CAST(id AS BLOB)) BETWEEN 1 AND 128),
+ set_order INTEGER NOT NULL CHECK(set_order >= 0),
+ PRIMARY KEY(job_id, id),
+ UNIQUE(job_id, set_order)
+);
+CREATE TABLE intruder_payloads (
+ job_id TEXT NOT NULL,
+ set_id TEXT NOT NULL,
+ payload_index INTEGER NOT NULL CHECK(payload_index >= 0),
+ payload BLOB NOT NULL CHECK(length(payload) <= 1048576),
+ PRIMARY KEY(job_id, set_id, payload_index),
+ FOREIGN KEY(job_id, set_id) REFERENCES intruder_payload_sets(job_id, id) ON DELETE CASCADE
+);
+CREATE TABLE intruder_positions (
+ job_id TEXT NOT NULL REFERENCES intruder_jobs(id) ON DELETE CASCADE,
+ id TEXT NOT NULL CHECK(length(CAST(id AS BLOB)) BETWEEN 1 AND 128),
+ position_order INTEGER NOT NULL CHECK(position_order >= 0),
+ start_offset INTEGER NOT NULL CHECK(start_offset >= 0),
+ end_offset INTEGER NOT NULL CHECK(end_offset > start_offset),
+ payload_set_id TEXT NOT NULL,
+ PRIMARY KEY(job_id, id),
+ UNIQUE(job_id, position_order),
+ FOREIGN KEY(job_id, payload_set_id) REFERENCES intruder_payload_sets(job_id, id)
+);
+
+CREATE TABLE intruder_results (
+ job_id TEXT NOT NULL REFERENCES intruder_jobs(id) ON DELETE CASCADE,
+ sequence INTEGER NOT NULL CHECK(sequence >= 0),
+ selections_json TEXT NOT NULL CHECK(length(CAST(selections_json AS BLOB)) <= 2097152),
+ method TEXT NOT NULL CHECK(length(CAST(method AS BLOB)) BETWEEN 1 AND 32),
+ url TEXT NOT NULL CHECK(length(CAST(url AS BLOB)) BETWEEN 1 AND 65536),
+ status INTEGER NOT NULL CHECK(status BETWEEN 0 AND 999),
+ mime_type TEXT NOT NULL CHECK(length(CAST(mime_type AS BLOB)) <= 1024),
+ request_size INTEGER NOT NULL CHECK(request_size >= 0),
+ response_size INTEGER NOT NULL CHECK(response_size >= 0),
+ duration_ms INTEGER NOT NULL CHECK(duration_ms >= 0),
+ error_category TEXT NOT NULL CHECK(length(CAST(error_category AS BLOB)) <= 64),
+ response_truncated INTEGER NOT NULL CHECK(response_truncated IN (0,1)),
+ request_capture BLOB,
+ response_capture BLOB,
+ body_stored INTEGER NOT NULL CHECK(body_stored IN (0,1)),
+ storage_status TEXT NOT NULL CHECK(length(CAST(storage_status AS BLOB)) <= 64),
+ similarity INTEGER NOT NULL CHECK(similarity BETWEEN 0 AND 10000),
+ similarity_partial INTEGER NOT NULL CHECK(similarity_partial IN (0,1)),
+ status_diff INTEGER NOT NULL CHECK(status_diff IN (0,1)),
+ length_delta INTEGER NOT NULL,
+ duration_delta INTEGER NOT NULL,
+ mime_diff INTEGER NOT NULL CHECK(mime_diff IN (0,1)),
+ capture_bytes INTEGER NOT NULL CHECK(capture_bytes >= 0),
+ created_at_unix_nano INTEGER NOT NULL,
+ PRIMARY KEY(job_id, sequence)
+);
+CREATE INDEX intruder_results_status ON intruder_results(job_id, status, sequence);
+CREATE INDEX intruder_results_size ON intruder_results(job_id, response_size, sequence);
+CREATE INDEX intruder_results_duration ON intruder_results(job_id, duration_ms, sequence);
+CREATE INDEX intruder_results_similarity ON intruder_results(job_id, similarity, sequence);
+`)
+	return err
 }
 
 func applyWebSocketSchema(tx *sql.Tx) error {
