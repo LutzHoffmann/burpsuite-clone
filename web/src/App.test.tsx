@@ -262,6 +262,73 @@ test('sends a selected history request to repeater through the api', async () =>
   expect(await screen.findByDisplayValue('real response')).toBeInTheDocument();
 });
 
+test('opens a complete History request as an Intruder draft without sending it', async () => {
+  const history = [historyFixture(7, 'replay.test', '/submit')];
+  const raw = 'POST /submit HTTP/1.1\r\nHost: replay.test\r\n\r\nrequest text';
+  const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const { path, method } = requestDetails(input, init);
+    if (path === '/api/history/7' && method === 'GET') return jsonResponse({
+      ...exchangeFixture(7, 'replay.test', '/submit', 'captured'),
+      request: { ...exchangeFixture(7, 'replay.test', '/submit', 'captured').request, raw },
+    });
+    if (path === '/api/intruder/jobs' && method === 'GET') return jsonResponse([]);
+    const base = strictBaseResponse(input, init, history);
+    if (base) return base;
+    throw new Error(`Unexpected request: ${method} ${path}`);
+  });
+  vi.stubGlobal('fetch', fetchMock);
+  render(<App />);
+  const host = await screen.findByText('replay.test');
+  fireEvent.click(within(host.closest('tr')!).getByRole('button', { name: 'Send to Intruder' }));
+  expect(await screen.findByRole('heading', { name: 'Intruder' })).toBeInTheDocument();
+  expect(screen.getByLabelText('Destination URL')).toHaveValue('https://replay.test/submit');
+  expect(screen.getByLabelText('Raw HTTP request')).toHaveValue(raw.replace(/\r\n/g, '\n'));
+  expect(countFetches(fetchMock, '/api/intruder/jobs', 'POST')).toBe(0);
+});
+
+test('hands the currently edited Repeater draft to Intruder', async () => {
+  const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const { path, method } = requestDetails(input, init);
+    if (path === '/api/intruder/jobs' && method === 'GET') return jsonResponse([]);
+    const base = strictBaseResponse(input, init, []);
+    if (base) return base;
+    throw new Error(`Unexpected request: ${method} ${path}`);
+  });
+  vi.stubGlobal('fetch', fetchMock);
+  render(<App />);
+  fireEvent.change(await screen.findByLabelText('URL'), { target: { value: 'https://edited.test/path?q=1' } });
+  fireEvent.change(screen.getByLabelText(/Body Text-safe editing only/), { target: { value: 'edited body' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Send to Intruder' }));
+  expect(await screen.findByRole('heading', { name: 'Intruder' })).toBeInTheDocument();
+  expect(screen.getByLabelText('Destination URL')).toHaveValue('https://edited.test/path?q=1');
+  expect((screen.getByLabelText('Raw HTTP request') as HTMLTextAreaElement).value).toContain('edited body');
+  expect(countFetches(fetchMock, '/api/repeater/sessions/default/send', 'POST')).toBe(0);
+});
+
+test('ignores an older History handoff that finishes after a newer one', async () => {
+  const first = deferred<Response>();
+  const second = deferred<Response>();
+  const history = [historyFixture(7, 'first.test', '/one'), historyFixture(8, 'second.test', '/two')];
+  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const { path, method } = requestDetails(input, init);
+    if (path === '/api/history/7') return first.promise;
+    if (path === '/api/history/8') return second.promise;
+    if (path === '/api/intruder/jobs' && method === 'GET') return jsonResponse([]);
+    const base = strictBaseResponse(input, init, history);
+    if (base) return base;
+    throw new Error(`Unexpected request: ${method} ${path}`);
+  }));
+  render(<App />);
+  const firstHost = await screen.findByText('first.test');
+  const secondHost = await screen.findByText('second.test');
+  fireEvent.click(within(firstHost.closest('tr')!).getByRole('button', { name: 'Send to Intruder' }));
+  fireEvent.click(within(secondHost.closest('tr')!).getByRole('button', { name: 'Send to Intruder' }));
+  await act(async () => second.resolve(jsonResponse({ ...exchangeFixture(8, 'second.test', '/two', 'ok'), request: { ...exchangeFixture(8, 'second.test', '/two', 'ok').request, raw: 'POST /two HTTP/1.1\r\nHost: second.test\r\n\r\n' } })));
+  await waitFor(() => expect(screen.getByLabelText('Destination URL')).toHaveValue('https://second.test/two'));
+  await act(async () => first.resolve(jsonResponse({ ...exchangeFixture(7, 'first.test', '/one', 'ok'), request: { ...exchangeFixture(7, 'first.test', '/one', 'ok').request, raw: 'POST /one HTTP/1.1\r\nHost: first.test\r\n\r\n' } })));
+  expect(screen.getByLabelText('Destination URL')).toHaveValue('https://second.test/two');
+});
+
 test('loads intercept queue and calls edit-forward and drop api actions', async () => {
   const actions: Array<{ url: string; init?: RequestInit }> = [];
   let queue = [
@@ -407,7 +474,7 @@ test('filters History by text and scope and renders valid sibling row controls',
     expect(cells[6]).toHaveTextContent('125 ms');
     expect(cells[7]).toHaveTextContent(new Date('2026-08-19T10:24:00Z').toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }));
     expect(row.querySelector('button button')).toBeNull();
-    expect(within(row).getAllByRole('button')).toHaveLength(2);
+    expect(within(row).getAllByRole('button')).toHaveLength(3);
   }
 });
 

@@ -6,6 +6,7 @@ type HistoryTableProps = {
   addingToScope: boolean;
   onSelect: (id: number) => void;
   onSendToRepeater: (id: number) => void;
+  onSendToIntruder?: (id: number) => void;
   onAddOriginToScope: (item: HistoryItem) => void;
 };
 
@@ -17,7 +18,7 @@ function formatTime(startedAt: string) {
   return new Date(startedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 }
 
-export function HistoryTable({ items, selectedId, addingToScope, onSelect, onSendToRepeater, onAddOriginToScope }: HistoryTableProps) {
+export function HistoryTable({ items, selectedId, addingToScope, onSelect, onSendToRepeater, onSendToIntruder, onAddOriginToScope }: HistoryTableProps) {
   return (
     <div className="request-table">
       <table aria-label="Request history">
@@ -46,7 +47,7 @@ export function HistoryTable({ items, selectedId, addingToScope, onSelect, onSen
           <td headers="history-duration">{item.durationMs} ms</td>
           <td headers="history-time">{formatTime(item.startedAt)}</td>
           <td headers="history-scope"><span className={`scope-badge ${item.inScope ? 'in-scope' : 'out-of-scope'}`}>{item.inScope ? 'In scope' : 'Out of scope'}</span></td>
-          <td headers="history-action"><button className="add-scope-button" disabled={addingToScope} onClick={(event) => { event.stopPropagation(); onAddOriginToScope(item); }} type="button">Add {item.host} to scope</button></td>
+          <td headers="history-action"><div className="history-row-actions"><button className="add-scope-button" disabled={addingToScope} onClick={(event) => { event.stopPropagation(); onAddOriginToScope(item); }} type="button">Add {item.host} to scope</button>{onSendToIntruder && <button className="add-scope-button" onClick={(event) => { event.stopPropagation(); onSendToIntruder(item.id); }} type="button">Send to Intruder</button>}</div></td>
         </tr>)}</tbody>
       </table>
     </div>

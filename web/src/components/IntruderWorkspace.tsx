@@ -1,10 +1,14 @@
 import { useEffect, useRef, useState } from 'react';
 import { connectEvents } from '../api/events';
+import type { IntruderSource } from '../api/intruderDraft';
+import { byteOffsetInRaw, canonicalEditedRequest, displayRawRequest } from '../api/intruderBytes';
+import { convertPayloadEditor, displayPayloads, encodePayloadEditor } from '../api/intruderPayloads';
+import type { PayloadEditor } from '../api/intruderPayloads';
 import {
-  controlIntruderJob, createIntruderJob, deleteIntruderJob, getIntruderJob, listIntruderJobs,
+  controlIntruderJob, createIntruderJob, deleteIntruderJob, getIntruderJob, getIntruderResult, listIntruderJobs,
   listIntruderResults, updateIntruderJob,
 } from '../api/intruder';
-import type { AttackType, IntruderConfig, IntruderJob, IntruderJobSummary, IntruderPosition, IntruderResult } from '../api/intruder';
+import type { AttackType, IntruderConfig, IntruderJob, IntruderJobSummary, IntruderPosition, IntruderResult, IntruderResultFilters } from '../api/intruder';
 
 function encodeBytes(bytes: Uint8Array): string {
   let binary = '';
@@ -16,21 +20,35 @@ function decodeText(value: string): string {
   return new TextDecoder('utf-8', { fatal: true }).decode(Uint8Array.from(atob(value), (character) => character.charCodeAt(0)));
 }
 
-const canonical = (value: string) => value.replace(/\r?\n/g, '\r\n');
+function capturePreview(value: string): string {
+  if (!value) return 'No retained body bytes.';
+  const bytes = Uint8Array.from(atob(value), (character) => character.charCodeAt(0));
+  const prefix = bytes.subarray(0, 64 * 1024);
+  let output: string;
+  try { output = new TextDecoder('utf-8', { fatal: true }).decode(prefix); }
+  catch { output = Array.from(prefix, (byte) => byte.toString(16).padStart(2, '0')).join(' '); }
+  return output + (bytes.length > prefix.length ? '\n… preview limited to 64 KiB' : '');
+}
+
 const defaultRaw = 'GET / HTTP/1.1\nHost: 127.0.0.1\n\n';
 const emptyConfig: IntruderConfig = {
-  attack: 'sniper', template: { method: 'GET', url: 'http://127.0.0.1/', raw: encodeText(canonical(defaultRaw)) },
+  attack: 'sniper', template: { method: 'GET', url: 'http://127.0.0.1/', raw: encodeText(canonicalEditedRequest(defaultRaw)) },
   positions: [], payloadSets: [], requestLimit: 1000, concurrency: 2, ratePerSecond: 5, timeoutMs: 30000,
 };
 
-export function IntruderWorkspace({ leaveGuard }: { leaveGuard?: { current: () => boolean } }) {
+export function IntruderWorkspace({ leaveGuard, source, onConsumeSource }: { leaveGuard?: { current: () => boolean }; source?: IntruderSource | null; onConsumeSource?: () => void }) {
   const [jobs, setJobs] = useState<IntruderJobSummary[]>([]);
   const [selectedID, setSelectedID] = useState<string | null>(null);
   const [job, setJob] = useState<IntruderJob | null>(null);
   const [config, setConfig] = useState<IntruderConfig>(emptyConfig);
   const [raw, setRaw] = useState(defaultRaw);
-  const [payloads, setPayloads] = useState<Record<string, string>>({});
+  const [rawModified, setRawModified] = useState(false);
+  const [payloads, setPayloads] = useState<Record<string, PayloadEditor>>({});
   const [results, setResults] = useState<IntruderResult[]>([]);
+  const [selectedSequence, setSelectedSequence] = useState<number | null>(null);
+  const [detail, setDetail] = useState<IntruderResult | null>(null);
+  const [draftFilters, setDraftFilters] = useState<IntruderResultFilters>({});
+  const [filters, setFilters] = useState<IntruderResultFilters>({});
   const [cursor, setCursor] = useState<number | null>(null);
   const [nextCursor, setNextCursor] = useState<number | null>(null);
   const [busy, setBusy] = useState(false);
@@ -39,8 +57,26 @@ export function IntruderWorkspace({ leaveGuard }: { leaveGuard?: { current: () =
   const [refresh, setRefresh] = useState(0);
   const rawRef = useRef<HTMLTextAreaElement>(null);
   const editorLoadedID = useRef<string | null>(null);
+  const canDiscardDraft = () => !dirty || window.confirm('Discard unsaved Intruder draft changes?');
 
-  if (leaveGuard) leaveGuard.current = () => !dirty || window.confirm('Discard unsaved Intruder draft changes?');
+  if (leaveGuard) leaveGuard.current = canDiscardDraft;
+
+  useEffect(() => {
+    if (!source) return;
+    editorLoadedID.current = null;
+    setSelectedID(null);
+    setJob(null);
+    setConfig({ ...emptyConfig, template: { method: source.method, url: source.url, raw: encodeText(source.raw) } });
+    setRaw(displayRawRequest(source.raw));
+    setRawModified(false);
+    setPayloads({});
+    setResults([]);
+    setSelectedSequence(null);
+    setDetail(null);
+    setCursor(null);
+    setDirty(true);
+    onConsumeSource?.();
+  }, [source?.revision]);
 
   useEffect(() => connectEvents((event) => {
     if (event.type.startsWith('intruder.')) setRefresh((value) => value + 1);
@@ -64,10 +100,11 @@ export function IntruderWorkspace({ leaveGuard }: { leaveGuard?: { current: () =
         editorLoadedID.current = selectedID;
         setDirty(false);
         setConfig(next.config);
-        try { setRaw(decodeText(next.config.template.raw).replace(/\r\n/g, '\n')); } catch { setRaw(''); }
-        const text: Record<string, string> = {};
+        try { setRaw(displayRawRequest(decodeText(next.config.template.raw))); } catch { setRaw(''); }
+        setRawModified(false);
+        const text: Record<string, PayloadEditor> = {};
         for (const set of next.config.payloadSets) {
-          try { text[set.ID] = set.Payloads.map(decodeText).join('\n'); } catch { text[set.ID] = ''; }
+          text[set.ID] = displayPayloads(set.Payloads);
         }
         setPayloads(text);
       }
@@ -78,13 +115,23 @@ export function IntruderWorkspace({ leaveGuard }: { leaveGuard?: { current: () =
   useEffect(() => {
     if (!selectedID) return;
     const controller = new AbortController();
-    void listIntruderResults(selectedID, cursor ?? undefined, controller.signal).then((page) => {
+    void listIntruderResults(selectedID, cursor ?? undefined, controller.signal, filters).then((page) => {
       if (controller.signal.aborted) return;
       setResults(page.Results);
       setNextCursor(page.NextBeforeSequence);
     }).catch((cause) => { if (!controller.signal.aborted) setError(String(cause)); });
     return () => controller.abort();
-  }, [selectedID, cursor, refresh]);
+  }, [selectedID, cursor, refresh, filters]);
+
+  useEffect(() => {
+    if (!selectedID || selectedSequence === null) { setDetail(null); return; }
+    const controller = new AbortController();
+    setDetail(null);
+    void getIntruderResult(selectedID, selectedSequence, controller.signal).then((item) => {
+      if (!controller.signal.aborted) setDetail(item);
+    }).catch((cause) => { if (!controller.signal.aborted) setError(String(cause)); });
+    return () => controller.abort();
+  }, [selectedID, selectedSequence]);
 
   const run = async (task: () => Promise<IntruderJob | void>) => {
     setBusy(true);
@@ -101,23 +148,30 @@ export function IntruderWorkspace({ leaveGuard }: { leaveGuard?: { current: () =
   const addPosition = () => {
     const element = rawRef.current;
     if (!element || element.selectionStart === element.selectionEnd) { setError('Select request bytes first.'); return; }
-    const start = new TextEncoder().encode(canonical(raw.slice(0, element.selectionStart))).length;
-    const end = new TextEncoder().encode(canonical(raw.slice(0, element.selectionEnd))).length;
+    let start: number;
+    let end: number;
+    try {
+      const source = rawModified ? canonicalEditedRequest(raw) : decodeText(config.template.raw);
+      start = byteOffsetInRaw(source, element.selectionStart);
+      end = byteOffsetInRaw(source, element.selectionEnd);
+    } catch (cause) { setError(cause instanceof Error ? cause.message : 'Invalid request selection.'); return; }
     if (config.positions.some((position) => start < position.End && end > position.Start)) { setError('Positions must not overlap.'); return; }
-    const id = `p${config.positions.length + 1}`;
+    let nextID = 1;
+    while (config.positions.some((position) => position.ID === `p${nextID}`)) nextID += 1;
+    const id = `p${nextID}`;
     const position: IntruderPosition = { ID: id, Start: start, End: end, PayloadSetID: id };
     setConfig((current) => ({ ...current, positions: [...current.positions, position] }));
     setDirty(true);
-    setPayloads((current) => ({ ...current, [id]: '' }));
+    setPayloads((current) => ({ ...current, [id]: { mode: 'text', value: '' } }));
     setError('');
   };
 
   const currentConfig = (): IntruderConfig => ({
     ...config,
-    template: { ...config.template, method: raw.match(/^[A-Z]+(?= )/)?.[0] ?? config.template.method, raw: encodeText(canonical(raw)) },
+    template: { ...config.template, method: raw.match(/^[A-Z]+(?= )/)?.[0] ?? config.template.method, raw: rawModified ? encodeText(canonicalEditedRequest(raw)) : config.template.raw },
     payloadSets: config.positions.map((position) => ({
       ID: position.PayloadSetID,
-      Payloads: (payloads[position.PayloadSetID] ?? '').split('\n').map(encodeText),
+      Payloads: encodePayloadEditor(payloads[position.PayloadSetID] ?? { mode: 'text', value: '' }),
     })),
   });
 
@@ -132,9 +186,9 @@ export function IntruderWorkspace({ leaveGuard }: { leaveGuard?: { current: () =
 
   return <section className="intruder-workspace" aria-label="Intruder workspace">
     <header className="intruder-header"><span className="eyebrow">Authorized targets only</span><h1>Intruder</h1><p>Payload-driven HTTP testing. Every generated request must remain in Target Scope.</p></header>
-    <aside className="intruder-jobs"><div className="intruder-heading"><h2>Jobs</h2><button type="button" className="quiet-button" onClick={() => { editorLoadedID.current = null; setSelectedID(null); setJob(null); setDirty(false); setConfig(emptyConfig); setRaw(defaultRaw); setPayloads({}); setResults([]); }}>New</button></div>
+    <aside className="intruder-jobs"><div className="intruder-heading"><h2>Jobs</h2><button type="button" className="quiet-button" onClick={() => { if (!canDiscardDraft()) return; editorLoadedID.current = null; setSelectedID(null); setSelectedSequence(null); setJob(null); setDirty(false); setConfig(emptyConfig); setRaw(defaultRaw); setRawModified(false); setPayloads({}); setResults([]); }}>New</button></div>
       {jobs.length === 0 && <p>No jobs yet.</p>}
-      {jobs.map((item) => <button key={item.ID} type="button" className={`intruder-job ${selectedID === item.ID ? 'selected' : ''}`} onClick={() => { setSelectedID(item.ID); setCursor(null); }}><strong>{item.Attack}</strong><span>{item.State} · {item.CompletedCount}/{item.TotalRequests}</span><small>{item.ID.slice(0, 12)}</small></button>)}
+      {jobs.map((item) => <button key={item.ID} type="button" className={`intruder-job ${selectedID === item.ID ? 'selected' : ''}`} onClick={() => { if (item.ID !== selectedID && !canDiscardDraft()) return; setSelectedID(item.ID); setSelectedSequence(null); setCursor(null); }}><strong>{item.Attack}</strong><span>{item.State} · {item.CompletedCount}/{item.TotalRequests}</span><small>{item.ID.slice(0, 12)}</small></button>)}
     </aside>
     <div className="intruder-editor"><div className="intruder-heading"><h2>{job ? `Job ${job.id.slice(0, 12)}` : 'New job'}</h2><span>{job?.state ?? 'draft'}</span></div>
       {error && <p className="api-error" role="alert">{error}</p>}
@@ -146,9 +200,22 @@ export function IntruderWorkspace({ leaveGuard }: { leaveGuard?: { current: () =
         <label>Request limit<input type="number" min="1" max="100000" value={config.requestLimit} disabled={!!job && job.state !== 'draft'} onChange={(event) => { setDirty(true); setConfig({ ...config, requestLimit: Number(event.target.value) }); }} /></label>
         <label>Timeout (ms)<input type="number" min="1000" max="120000" value={config.timeoutMs} disabled={!!job && job.state !== 'draft'} onChange={(event) => { setDirty(true); setConfig({ ...config, timeoutMs: Number(event.target.value) }); }} /></label>
       </div>
-      <label className="intruder-raw-label">Raw HTTP request<textarea ref={rawRef} spellCheck={false} value={raw} disabled={!!job && job.state !== 'draft'} onChange={(event) => { setDirty(true); setRaw(event.target.value); setConfig((current) => ({ ...current, positions: [] })); setPayloads({}); }} /></label>
+      <label className="intruder-raw-label">Raw HTTP request<textarea ref={rawRef} spellCheck={false} value={raw} disabled={!!job && job.state !== 'draft'} onChange={(event) => { setDirty(true); setRawModified(true); setRaw(event.target.value); setConfig((current) => ({ ...current, positions: [] })); setPayloads({}); }} /></label>
       <button type="button" className="quiet-button" disabled={!!job && job.state !== 'draft'} onClick={addPosition}>Mark selected bytes as position</button>
-      <div className="intruder-positions">{config.positions.map((position) => <div key={position.ID}><div className="intruder-heading"><strong>{position.ID} · bytes {position.Start}-{position.End}</strong><button type="button" className="quiet-button" disabled={!!job && job.state !== 'draft'} onClick={() => { setDirty(true); setConfig({ ...config, positions: config.positions.filter((candidate) => candidate.ID !== position.ID) }); }}>Remove</button></div><label>Payloads, one per line<textarea value={payloads[position.PayloadSetID] ?? ''} disabled={!!job && job.state !== 'draft'} onChange={(event) => { setDirty(true); setPayloads({ ...payloads, [position.PayloadSetID]: event.target.value }); }} /></label></div>)}</div>
+      <div className="intruder-positions">{config.positions.map((position) => {
+        const editor = payloads[position.PayloadSetID] ?? { mode: 'text', value: '' };
+        return <div key={position.ID}><div className="intruder-heading"><strong>{position.ID} · bytes {position.Start}-{position.End}</strong><button type="button" className="quiet-button" disabled={!!job && job.state !== 'draft'} onClick={() => { setDirty(true); setConfig({ ...config, positions: config.positions.filter((candidate) => candidate.ID !== position.ID) }); }}>Remove</button></div>
+          <label>Payload format for {position.ID}<select value={editor.mode} disabled={!!job && job.state !== 'draft'} onChange={(event) => {
+            try {
+              const converted = convertPayloadEditor(editor as PayloadEditor, event.target.value as PayloadEditor['mode']);
+              setPayloads({ ...payloads, [position.PayloadSetID]: converted });
+              setDirty(true);
+              setError('');
+            } catch (cause) { setError(cause instanceof Error ? cause.message : 'Invalid payload'); }
+          }}><option value="text">Text / UTF-8</option><option value="hex">Hex bytes</option></select></label>
+          <label>{editor.mode === 'hex' ? 'Hex payloads, one per line' : 'Payloads, one per line'}<textarea value={editor.value} disabled={!!job && job.state !== 'draft'} onChange={(event) => { setDirty(true); setPayloads({ ...payloads, [position.PayloadSetID]: { ...editor, value: event.target.value } as PayloadEditor }); }} /></label>
+        </div>;
+      })}</div>
       <div className="intruder-actions"><button type="button" className="quiet-button" disabled={busy || (!!job && job.state !== 'draft')} onClick={() => void save()}>{job?.state === 'draft' ? 'Save draft' : 'Create draft'}</button>
         {job?.state === 'draft' && <button type="button" className="quiet-button" disabled={busy || dirty} onClick={() => control('start')}>Start</button>}
         {job?.state === 'running' && <><button type="button" className="quiet-button" disabled={busy} onClick={() => control('pause')}>Pause</button><button type="button" className="quiet-button" disabled={busy} onClick={() => control('abort')}>Abort</button></>}
@@ -157,6 +224,16 @@ export function IntruderWorkspace({ leaveGuard }: { leaveGuard?: { current: () =
       </div>
       {job && <p className="intruder-progress">{job.completedCount} / {job.totalRequests} requests · {job.errorCount} errors {job.stateReason && `· ${job.stateReason}`}</p>}
     </div>
-    <section className="intruder-results"><div className="intruder-heading"><h2>Results</h2><span>100 per page</span></div><div className="intruder-result-list">{results.map((result) => <div className="intruder-result" key={result.Sequence}><strong>#{result.Sequence}</strong><span>{result.Status || result.ErrorCategory}</span><span>{result.ResponseSize} B</span><span>{result.MIMEType}</span><small>{result.URL}</small></div>)}</div>{selectedID && <div className="intruder-actions"><button type="button" className="quiet-button" disabled={cursor === null} onClick={() => setCursor(null)}>First page</button><button type="button" className="quiet-button" disabled={nextCursor === null} onClick={() => setCursor(nextCursor)}>Older</button></div>}</section>
+    <section className="intruder-results"><div className="intruder-heading"><h2>Results</h2><span>100 per page</span></div>
+      <div className="intruder-filters">
+        <label>Status<input type="number" min="100" max="599" value={draftFilters.status ?? ''} onChange={(event) => setDraftFilters({ ...draftFilters, status: event.target.value ? Number(event.target.value) : undefined })} /></label>
+        <label>Error<select value={draftFilters.errorCategory ?? ''} onChange={(event) => setDraftFilters({ ...draftFilters, errorCategory: event.target.value })}><option value="">All</option><option value="network">Network</option><option value="timeout">Timeout</option><option value="scope_revoked">Scope revoked</option><option value="cancelled">Cancelled</option><option value="worker_panic">Worker panic</option></select></label>
+        <label>MIME<input value={draftFilters.mimeType ?? ''} onChange={(event) => setDraftFilters({ ...draftFilters, mimeType: event.target.value })} /></label>
+        <label>Payload contains<input value={draftFilters.payloadSearch ?? ''} onChange={(event) => setDraftFilters({ ...draftFilters, payloadSearch: event.target.value })} /></label>
+        <button className="quiet-button" type="button" onClick={() => { setFilters({ ...draftFilters }); setCursor(null); setSelectedSequence(null); }}>Apply filters</button>
+      </div>
+      <div className="intruder-result-list">{results.map((result) => <button type="button" className="intruder-result" key={result.Sequence} aria-pressed={selectedSequence === result.Sequence} onClick={() => setSelectedSequence(result.Sequence)}><strong>#{result.Sequence}</strong><span>{result.Status || result.ErrorCategory}</span><span>{result.ResponseSize} B</span><span>{result.MIMEType}</span><small>{result.URL}</small></button>)}</div>{selectedID && <div className="intruder-actions"><button type="button" className="quiet-button" disabled={cursor === null} onClick={() => setCursor(null)}>First page</button><button type="button" className="quiet-button" disabled={nextCursor === null} onClick={() => setCursor(nextCursor)}>Older</button></div>}
+      {detail && <div className="intruder-detail"><h3>Result #{detail.Sequence}</h3><p>{detail.URL}</p><p>Status {detail.Status || detail.ErrorCategory} · {detail.ResponseSize} bytes · {detail.MIMEType || 'unknown MIME'}</p>{detail.StorageStatus && <p className="ws-notice">Storage: {detail.StorageStatus}</p>}{detail.ResponseTruncated && <p className="ws-notice">Response capture truncated.</p>}<h4>Response body</h4><pre>{capturePreview(detail.ResponseCapture)}</pre><h4>Request body</h4><pre>{capturePreview(detail.RequestCapture)}</pre></div>}
+    </section>
   </section>;
 }

@@ -5,6 +5,7 @@ type RepeaterProps = {
   initialRequest: SendRequest;
   result: SendResult | null;
   onSend: (request: SendRequest) => void;
+  onSendToIntruder?: (request: SendRequest) => void;
 };
 
 const formatHeaders = (headers: Record<string, string[]>) =>
@@ -19,7 +20,7 @@ const parseHeaders = (text: string) => text.split('\n').reduce<Record<string, st
   return headers;
 }, {});
 
-export function Repeater({ initialRequest, result, onSend }: RepeaterProps) {
+export function Repeater({ initialRequest, result, onSend, onSendToIntruder }: RepeaterProps) {
   const [method, setMethod] = useState(initialRequest.method);
   const [url, setUrl] = useState(initialRequest.url);
   const [headers, setHeaders] = useState(formatHeaders(initialRequest.headers));
@@ -36,7 +37,7 @@ export function Repeater({ initialRequest, result, onSend }: RepeaterProps) {
 
   return (
     <section className="repeater-panel" aria-label="Repeater">
-      <div className="repeater-heading"><div><span className="eyebrow">Single Tab</span><h2>Request Editor</h2></div><button className="send-button" type="button" onClick={send}>Send</button></div>
+      <div className="repeater-heading"><div><span className="eyebrow">Single Tab</span><h2>Request Editor</h2></div><div className="repeater-heading-actions">{onSendToIntruder && <button className="quiet-button" type="button" onClick={() => onSendToIntruder({ method, url, headers: parseHeaders(headers), body })}>Send to Intruder</button>}<button className="send-button" type="button" onClick={send}>Send</button></div></div>
       <div className="repeater-request-line">
         <label aria-label="Method">Verb<select value={method} onChange={(event) => setMethod(event.target.value)}><option>GET</option><option>POST</option><option>PUT</option><option>PATCH</option><option>DELETE</option></select></label>
         <label>URL<input value={url} onChange={(event) => setUrl(event.target.value)} /></label>

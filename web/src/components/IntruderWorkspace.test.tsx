@@ -34,5 +34,96 @@ it('sends selected request bytes and UTF-8 payloads as base64', async () => {
   await waitFor(() => expect(screen.getByRole('button', { name: 'Start' })).toBeEnabled());
   fireEvent.change(screen.getByLabelText('Destination URL'), { target: { value: 'http://changed.test/' } });
   expect(screen.getByRole('button', { name: 'Start' })).toBeDisabled();
+  const confirm = vi.fn(() => false);
+  vi.stubGlobal('confirm', confirm);
+  await userEvent.click(screen.getByRole('button', { name: 'New' }));
+  expect(confirm).toHaveBeenCalled();
+  expect(screen.getByLabelText('Destination URL')).toHaveValue('http://changed.test/');
+  vi.unstubAllGlobals();
+});
+
+it('rejects malformed hex and submits binary payload bytes exactly', async () => {
+  const creates: Array<{config: {payloadSets: Array<{Payloads: string[]}>}}> = [];
+  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const path = String(input);
+    if (path === '/api/intruder/jobs' && !init?.method) return response([]);
+    if (path === '/api/intruder/jobs' && init?.method === 'POST') {
+      const body = JSON.parse(String(init.body)) as typeof creates[number];
+      creates.push(body);
+      return response({ id: 'b'.repeat(32), state: 'draft', revision: 1, config: body.config }, 201);
+    }
+    if (path.includes('/results?')) return response({ Results: [], NextBeforeSequence: null });
+    if (path.endsWith('/api/intruder/jobs/' + 'b'.repeat(32))) return response({ id: 'b'.repeat(32), state: 'draft', revision: 1, config: creates[0].config });
+    throw new Error(`Unexpected ${path}`);
+  }));
+  vi.stubGlobal('WebSocket', undefined);
+  render(<IntruderWorkspace />);
+  const raw = screen.getByLabelText('Raw HTTP request') as HTMLTextAreaElement;
+  raw.setSelectionRange(5, 6);
+  await userEvent.click(screen.getByRole('button', { name: 'Mark selected bytes as position' }));
+  await userEvent.selectOptions(screen.getByLabelText('Payload format for p1'), 'hex');
+  const hex = screen.getByLabelText('Hex payloads, one per line');
+  fireEvent.change(hex, { target: { value: '0 f' } });
+  await userEvent.click(screen.getByRole('button', { name: 'Create draft' }));
+  expect(screen.getByRole('alert')).toHaveTextContent(/complete byte pairs/);
+  expect(creates).toHaveLength(0);
+  fireEvent.change(hex, { target: { value: '00 ff' } });
+  await userEvent.click(screen.getByRole('button', { name: 'Create draft' }));
+  await waitFor(() => expect(creates).toHaveLength(1));
+  expect(creates[0].config.payloadSets[0].Payloads).toEqual(['AP8=']);
+  vi.unstubAllGlobals();
+});
+
+it('filters a result page and loads only the selected bounded detail', async () => {
+  const id = 'c'.repeat(32);
+  const queries: string[] = [];
+  const config = { attack: 'sniper', template: { method: 'GET', url: 'http://local.test/', raw: btoa('GET / HTTP/1.1\r\nHost: local.test\r\n\r\n') }, positions: [], payloadSets: [], requestLimit: 1, concurrency: 1, ratePerSecond: 1, timeoutMs: 1000 };
+  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+    const path = String(input);
+    if (path === '/api/intruder/jobs') return response([{ ID: id, Attack: 'sniper', State: 'completed', CompletedCount: 1, TotalRequests: 1 }]);
+    if (path === `/api/intruder/jobs/${id}`) return response({ id, state: 'completed', revision: 3, config, completedCount: 1, totalRequests: 1, errorCount: 0 });
+    if (path.startsWith(`/api/intruder/jobs/${id}/results?`)) {
+      queries.push(path);
+      return response({ Results: [{ Sequence: 0, URL: 'http://local.test/', Status: 200, ResponseSize: 2, MIMEType: 'text/plain', ErrorCategory: '' }], NextBeforeSequence: null });
+    }
+    if (path === `/api/intruder/jobs/${id}/results/0`) return response({ Sequence: 0, URL: 'http://local.test/', Status: 200, ResponseSize: 2, MIMEType: 'text/plain', ResponseCapture: btoa('ok'), RequestCapture: '', StorageStatus: '', ResponseTruncated: false });
+    throw new Error(`Unexpected ${path}`);
+  }));
+  vi.stubGlobal('WebSocket', undefined);
+  render(<IntruderWorkspace />);
+  await userEvent.click(await screen.findByRole('button', { name: /sniper/ }));
+  await userEvent.click(await screen.findByRole('button', { name: /#0/ }));
+  expect(await screen.findByText('ok')).toBeInTheDocument();
+  fireEvent.change(screen.getByLabelText('Status'), { target: { value: '200' } });
+  await userEvent.click(screen.getByRole('button', { name: 'Apply filters' }));
+  await waitFor(() => expect(queries.some((query) => query.includes('status=200'))).toBe(true));
+  vi.unstubAllGlobals();
+});
+
+it('preserves a handed-off request body byte-for-byte when marking a position', async () => {
+  const original = 'POST / HTTP/1.1\r\nHost: local.test\r\n\r\nline1\nline2';
+  let submitted: {config: {template: {raw: string}; positions: Array<{Start: number; End: number}>}} | null = null;
+  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    if (String(input) === '/api/intruder/jobs' && !init?.method) return response([]);
+    if (String(input) === '/api/intruder/jobs' && init?.method === 'POST') {
+      submitted = JSON.parse(String(init.body));
+      return response({ id: 'd'.repeat(32), state: 'draft', revision: 1, config: submitted!.config }, 201);
+    }
+    if (String(input).includes('/results?')) return response({ Results: [], NextBeforeSequence: null });
+    if (String(input).endsWith('/api/intruder/jobs/' + 'd'.repeat(32))) return response({ id: 'd'.repeat(32), state: 'draft', revision: 1, config: submitted!.config });
+    throw new Error(`Unexpected ${String(input)}`);
+  }));
+  vi.stubGlobal('WebSocket', undefined);
+  render(<IntruderWorkspace source={{ url: 'http://local.test/', method: 'POST', raw: original, revision: 1 }} />);
+  const editor = await screen.findByLabelText('Raw HTTP request') as HTMLTextAreaElement;
+  await waitFor(() => expect(editor.value).toContain('line1\nline2'));
+  const selected = editor.value.indexOf('line2');
+  editor.setSelectionRange(selected, selected + 5);
+  await userEvent.click(screen.getByRole('button', { name: 'Mark selected bytes as position' }));
+  fireEvent.change(screen.getByLabelText('Payloads, one per line'), { target: { value: 'replacement' } });
+  await userEvent.click(screen.getByRole('button', { name: 'Create draft' }));
+  await waitFor(() => expect(submitted).not.toBeNull());
+  expect(atob(submitted!.config.template.raw)).toBe(original);
+  expect(submitted!.config.positions[0].Start).toBe(new TextEncoder().encode(original.slice(0, original.indexOf('line2'))).length);
   vi.unstubAllGlobals();
 });

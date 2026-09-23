@@ -9,7 +9,8 @@ ordered regex/literal replacements, history, inspection, Repeater, Target Scope,
 Site Map, passive WebSocket history, and local project storage.
 
 The Intruder workspace adds scope-bound, persistent HTTP fuzzing with four
-attack modes, rate limits, pause/resume/abort controls, and paged results. See
+attack modes, rate limits, pause/resume/abort controls, History/Repeater handoff,
+text and hex payloads, and paged results. See
 [Intruder setup and current limits](docs/setup/intruder.md).
 
 WebSocket forwarding supports `ws://` and `wss://`, with a read-only message

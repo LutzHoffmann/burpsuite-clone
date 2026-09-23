@@ -17,6 +17,8 @@ import {
   updateInterceptConfig,
 } from './api/client';
 import { connectEvents } from './api/events';
+import { historyIntruderDraft, repeaterIntruderDraft } from './api/intruderDraft';
+import type { IntruderSource } from './api/intruderDraft';
 import { useHistoryPage } from './api/useHistoryPage';
 import { useStorageStatus } from './api/useStorageStatus';
 import { HistoryTable } from './components/HistoryTable';
@@ -147,6 +149,8 @@ export function App() {
   const configRevision = useRef(0);
   const [repeaterRequest, setRepeaterRequest] = useState<SendRequest>(emptyRepeaterRequest);
   const [repeaterResult, setRepeaterResult] = useState<SendResult | null>(null);
+  const [intruderSource, setIntruderSource] = useState<IntruderSource | null>(null);
+  const intruderHandoffRevision = useRef(0);
   const [apiErrors, setAPIErrors] = useState<Record<string, string | undefined>>({});
   const [view, setViewState] = useState<'traffic' | 'target' | 'websockets' | 'intruder' | 'settings'>('traffic');
   const wsLeaveGuard = useRef<() => boolean>(() => true);
@@ -154,6 +158,7 @@ export function App() {
   const setView = (next: typeof view) => {
     if (view === 'websockets' && next !== view && !wsLeaveGuard.current()) return;
     if (view === 'intruder' && next !== view && !intruderLeaveGuard.current()) return;
+    if (next !== 'intruder') intruderHandoffRevision.current += 1;
     setViewState(next);
   };
   const [historyQuery, setHistoryQuery] = useState('');
@@ -333,6 +338,32 @@ export function App() {
     }
   };
 
+  const sendHistoryToIntruder = async (id: number) => {
+    const revision = ++intruderHandoffRevision.current;
+    try {
+      const detail = exchange?.id === id ? exchange : await getExchange(id);
+      if (revision !== intruderHandoffRevision.current) return;
+      const draft = historyIntruderDraft(detail);
+      setIntruderSource((current) => ({ ...draft, revision: (current?.revision ?? 0) + 1 }));
+      setView('intruder');
+      setAPIErrors((errors) => ({ ...errors, intruder: undefined }));
+    } catch (error) {
+      setAPIErrors((errors) => ({ ...errors, intruder: `Send to Intruder failed: ${error instanceof Error ? error.message : 'request failed'}` }));
+    }
+  };
+
+  const sendRepeaterToIntruder = (request: SendRequest) => {
+    intruderHandoffRevision.current += 1;
+    try {
+      const draft = repeaterIntruderDraft(request);
+      setIntruderSource((current) => ({ ...draft, revision: (current?.revision ?? 0) + 1 }));
+      setView('intruder');
+      setAPIErrors((errors) => ({ ...errors, intruder: undefined }));
+    } catch (error) {
+      setAPIErrors((errors) => ({ ...errors, intruder: `Send to Intruder failed: ${error instanceof Error ? error.message : 'request failed'}` }));
+    }
+  };
+
   const sendRepeater = async (request: SendRequest) => {
     try {
       const result = await sendRepeaterAPI('default', request);
@@ -406,7 +437,7 @@ export function App() {
           <button className={`nav-item ${view === 'settings' ? 'active' : ''}`} onClick={() => setView('settings')} type="button"><SlidersHorizontal size={17} />Settings</button>
         </nav>
 
-        {view === 'intruder' ? <IntruderWorkspace leaveGuard={intruderLeaveGuard} /> : view === 'websockets' ? <WebSocketsWorkspace leaveGuard={wsLeaveGuard} /> : view === 'target' ? <TargetWorkspace
+        {view === 'intruder' ? <IntruderWorkspace leaveGuard={intruderLeaveGuard} source={intruderSource} onConsumeSource={() => setIntruderSource(null)} /> : view === 'websockets' ? <WebSocketsWorkspace leaveGuard={wsLeaveGuard} /> : view === 'target' ? <TargetWorkspace
           refresh={targetRefresh}
           onOpenHistory={(id) => { setSelectedId(id); setView('traffic'); }}
           onSendToRepeater={(id) => { setView('traffic'); void sendHistoryToRepeater(id); }}
@@ -428,7 +459,7 @@ export function App() {
           {history.error && <div className="api-error" role="status">{history.error}</div>}
           {history.loading && <p className="history-message">Loading requests...</p>}
           {!history.loading && !history.error && history.items.length === 0 && <p className="history-message">No matching requests.</p>}
-          <HistoryTable addingToScope={addingOriginToScope} items={history.items} selectedId={selectedId} onSelect={setSelectedId} onSendToRepeater={(id) => void sendHistoryToRepeater(id)} onAddOriginToScope={(item) => void addOriginToScope(item)} />
+          <HistoryTable addingToScope={addingOriginToScope} items={history.items} selectedId={selectedId} onSelect={setSelectedId} onSendToRepeater={(id) => void sendHistoryToRepeater(id)} onSendToIntruder={(id) => void sendHistoryToIntruder(id)} onAddOriginToScope={(item) => void addOriginToScope(item)} />
         </section>
 
         <section className="inspector-panel" aria-label="Exchange inspector">
@@ -461,7 +492,7 @@ export function App() {
             disabled={!configReady || configSaving} onEnabledChange={(responseEnabled) => void saveIntercept({ responseEnabled })}
             onForward={actOnResponse} onDrop={actOnResponse} />
           <InterceptRules config={interceptConfig} disabled={!configReady || configSaving} onSave={(patch) => void saveIntercept(patch)} />
-          <Repeater initialRequest={repeaterRequest} result={repeaterResult} onSend={(request) => void sendRepeater(request)} />
+          <Repeater initialRequest={repeaterRequest} result={repeaterResult} onSend={(request) => void sendRepeater(request)} onSendToIntruder={sendRepeaterToIntruder} />
         </section></>}
       </div>
     </main>

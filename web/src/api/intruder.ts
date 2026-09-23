@@ -23,9 +23,12 @@ export interface IntruderJobSummary {
 }
 export interface IntruderResult {
   Sequence: number; URL: string; Status: number; ErrorCategory: string; Duration: number;
-  ResponseSize: number; MIMEType: string; ResponseCapture: string; StorageStatus: string;
+  ResponseSize: number; MIMEType: string; ResponseCapture: string; RequestCapture: string; StorageStatus: string;
+  ResponseTruncated: boolean; BodyStored: boolean; Similarity: number; SimilarityPartial: boolean;
+  StatusDiff: boolean; LengthDelta: number; DurationDelta: number; MIMEDiff: boolean;
 }
 export interface IntruderResultPage { Results: IntruderResult[]; NextBeforeSequence: number | null }
+export interface IntruderResultFilters { status?: number; errorCategory?: string; mimeType?: string; payloadSearch?: string; minSize?: number; maxSize?: number; minDurationMs?: number; maxDurationMs?: number; minSimilarity?: number; maxSimilarity?: number }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, { cache: 'no-store', ...init });
@@ -44,8 +47,11 @@ export const createIntruderJob = (config: IntruderConfig) => request<IntruderJob
 export const updateIntruderJob = (job: IntruderJob, config: IntruderConfig) => request<IntruderJob>(`/api/intruder/jobs/${job.id}`, json('PUT', { revision: job.revision, config }));
 export const controlIntruderJob = (job: IntruderJob, action: 'start' | 'pause' | 'resume' | 'abort') => request<IntruderJob>(`/api/intruder/jobs/${job.id}/${action}`, json('POST', { revision: job.revision }));
 export const deleteIntruderJob = (id: string) => request<void>(`/api/intruder/jobs/${id}`, { method: 'DELETE' });
-export const listIntruderResults = (id: string, beforeSequence?: number, signal?: AbortSignal) => {
+export const listIntruderResults = (id: string, beforeSequence?: number, signal?: AbortSignal, filters: IntruderResultFilters = {}) => {
   const query = new URLSearchParams({ limit: '100' });
   if (beforeSequence !== undefined) query.set('beforeSequence', String(beforeSequence));
+  for (const [key, value] of Object.entries(filters)) if (value !== undefined && value !== '') query.set(key, String(value));
   return request<IntruderResultPage>(`/api/intruder/jobs/${id}/results?${query}`, { signal });
 };
+export const getIntruderResult = (id: string, sequence: number, signal?: AbortSignal) =>
+  request<IntruderResult>(`/api/intruder/jobs/${id}/results/${sequence}`, { signal });
