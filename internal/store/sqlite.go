@@ -26,6 +26,11 @@ func OpenSQLite(path string) (*SQLiteStore, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite database: %w", err)
 	}
+	var journalMode string
+	if err := db.QueryRow(`PRAGMA journal_mode=WAL`).Scan(&journalMode); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("enable SQLite WAL: %w", err)
+	}
 
 	if err := applyMigrations(db); err != nil {
 		_ = db.Close()

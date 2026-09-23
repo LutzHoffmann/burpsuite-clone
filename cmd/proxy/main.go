@@ -8,6 +8,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -19,6 +20,7 @@ import (
 	"github.com/lutzifer/burpsuite-clone/internal/config"
 	"github.com/lutzifer/burpsuite-clone/internal/events"
 	"github.com/lutzifer/burpsuite-clone/internal/intercept"
+	"github.com/lutzifer/burpsuite-clone/internal/intruder"
 	"github.com/lutzifer/burpsuite-clone/internal/proxy"
 	"github.com/lutzifer/burpsuite-clone/internal/repeater"
 	"github.com/lutzifer/burpsuite-clone/internal/scope"
@@ -51,6 +53,11 @@ func main() {
 	}
 	scopeManager := scope.NewManager(compiledScope)
 	hub := events.NewHub()
+	intruderService, err := intruder.NewService(context.Background(), history, intruderScope{scopeManager}, repeater.NewHTTPSender(nil), hub)
+	if err != nil {
+		log.Fatalf("recover Intruder jobs: %v", err)
+	}
+	defer intruderService.Close()
 	targetService := target.NewService(history, scopeManager, hub, target.Limits{
 		MaxJSONDepth: 16, MaxFields: 1000, MaxMultipartFields: 100,
 	})
@@ -105,6 +112,7 @@ func main() {
 		ProxyAddr:    cfg.ProxyAddr,
 		Intercept:    interceptController,
 		Target:       targetService,
+		Intruder:     intruderService,
 		MaxBodyBytes: cfg.BodyLimitBytes,
 	})
 	httpServer := &http.Server{
@@ -128,6 +136,16 @@ func main() {
 		wsSessions.Close()
 		log.Fatal(err)
 	}
+}
+
+type intruderScope struct{ manager *scope.Manager }
+
+func (s intruderScope) Allows(rawURL string) bool {
+	u, err := url.Parse(rawURL)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.User != nil {
+		return false
+	}
+	return s.manager.Current().Classify(scope.Target{Scheme: u.Scheme, Host: u.Host, Path: u.Path}).InScope
 }
 
 func restoreInterceptConfig(ctx context.Context, settings interface {

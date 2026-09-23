@@ -26,6 +26,7 @@ type Config struct {
 	ProxyAddr    string
 	Intercept    *intercept.Controller
 	Target       *target.Service
+	Intruder     IntruderService
 	MaxBodyBytes int64
 }
 
@@ -82,6 +83,17 @@ func NewServer(cfg Config) *Server {
 	srv.mux.HandleFunc("GET /api/target/endpoints/{id}/requests", srv.handleTargetRequests)
 	srv.mux.HandleFunc("GET /api/target/endpoints/{id}/parameters", srv.handleTargetParameters)
 	srv.mux.HandleFunc("GET /api/target/rebuild", srv.handleTargetRebuild)
+	srv.mux.HandleFunc("POST /api/intruder/jobs", srv.handleIntruderCreate)
+	srv.mux.HandleFunc("GET /api/intruder/jobs", srv.handleIntruderList)
+	srv.mux.HandleFunc("GET /api/intruder/jobs/{id}", srv.handleIntruderGet)
+	srv.mux.HandleFunc("PUT /api/intruder/jobs/{id}", srv.handleIntruderUpdate)
+	srv.mux.HandleFunc("DELETE /api/intruder/jobs/{id}", srv.handleIntruderDelete)
+	srv.mux.HandleFunc("POST /api/intruder/jobs/{id}/start", srv.handleIntruderStart)
+	srv.mux.HandleFunc("POST /api/intruder/jobs/{id}/pause", srv.handleIntruderPause)
+	srv.mux.HandleFunc("POST /api/intruder/jobs/{id}/resume", srv.handleIntruderResume)
+	srv.mux.HandleFunc("POST /api/intruder/jobs/{id}/abort", srv.handleIntruderAbort)
+	srv.mux.HandleFunc("GET /api/intruder/jobs/{id}/results", srv.handleIntruderResults)
+	srv.mux.HandleFunc("GET /api/intruder/jobs/{id}/results/{sequence}", srv.handleIntruderResult)
 	srv.mux.HandleFunc("POST /api/target/rebuild", srv.handleTargetRebuildRetry)
 	srv.mux.HandleFunc("GET /", srv.handleUI)
 	if cfg.Intercept != nil {
