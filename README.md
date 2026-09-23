@@ -8,6 +8,10 @@ The application provides HTTP/HTTPS proxying, independent request and response i
 ordered regex/literal replacements, history, inspection, Repeater, Target Scope,
 Site Map, passive WebSocket history, and local project storage.
 
+The Intruder workspace adds scope-bound, persistent HTTP fuzzing with four
+attack modes, rate limits, pause/resume/abort controls, and paged results. See
+[Intruder setup and current limits](docs/setup/intruder.md).
+
 WebSocket forwarding supports `ws://` and `wss://`, with a read-only message
 inspector and an independent WebSocket Repeater with one-shot and manual session
 modes. Session mode keeps one connection open for multiple sends and unsolicited
@@ -41,7 +45,7 @@ Target scope is an authorization boundary, not permission to test a system. Open
 - Scope changes rebuild Site Map in the background. The last complete map remains visible until the replacement is ready.
 - The parameter inventory stores names, locations, and types only. It never stores parameter values; captured values remain in History.
 - An empty scope permits no interception.
-- Future active or attack tools must require explicit scope before they can run.
+- Intruder requires a current in-scope destination before each generated send.
 
 ### Operator flow
 

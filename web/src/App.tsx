@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { Boxes, FileText, History, Map, Network, Search, Send, SlidersHorizontal } from 'lucide-react';
+import { Boxes, FileText, History, Map, Network, Search, Send, SlidersHorizontal, Crosshair } from 'lucide-react';
 import {
   ApiError,
   dropIntercept as dropInterceptAPI,
@@ -22,6 +22,7 @@ import { useStorageStatus } from './api/useStorageStatus';
 import { HistoryTable } from './components/HistoryTable';
 import { InterceptPanel } from './components/InterceptPanel';
 import { InterceptRules, matchAllRule } from './components/InterceptRules';
+import { IntruderWorkspace } from './components/IntruderWorkspace';
 import { Inspector } from './components/Inspector';
 import { Repeater } from './components/Repeater';
 import { Settings } from './components/Settings';
@@ -147,10 +148,12 @@ export function App() {
   const [repeaterRequest, setRepeaterRequest] = useState<SendRequest>(emptyRepeaterRequest);
   const [repeaterResult, setRepeaterResult] = useState<SendResult | null>(null);
   const [apiErrors, setAPIErrors] = useState<Record<string, string | undefined>>({});
-  const [view, setViewState] = useState<'traffic' | 'target' | 'websockets' | 'settings'>('traffic');
+  const [view, setViewState] = useState<'traffic' | 'target' | 'websockets' | 'intruder' | 'settings'>('traffic');
   const wsLeaveGuard = useRef<() => boolean>(() => true);
+  const intruderLeaveGuard = useRef<() => boolean>(() => true);
   const setView = (next: typeof view) => {
     if (view === 'websockets' && next !== view && !wsLeaveGuard.current()) return;
+    if (view === 'intruder' && next !== view && !intruderLeaveGuard.current()) return;
     setViewState(next);
   };
   const [historyQuery, setHistoryQuery] = useState('');
@@ -396,13 +399,14 @@ export function App() {
           <button className="nav-item" type="button"><History size={17} />History</button>
           <button className={`nav-item ${view === 'websockets' ? 'active' : ''}`} onClick={() => setView('websockets')} type="button"><Network size={17} />WebSockets</button>
           <button className={`nav-item ${view === 'target' ? 'active' : ''}`} onClick={openTarget} type="button"><Map size={17} />Target</button>
+          <button className={`nav-item ${view === 'intruder' ? 'active' : ''}`} onClick={() => setView('intruder')} type="button"><Crosshair size={17} />Intruder</button>
           <button className="nav-item" type="button"><Send size={17} />Repeater</button>
           <button className="nav-item" type="button"><Boxes size={17} />Extensions</button>
           <div className="nav-spacer" />
           <button className={`nav-item ${view === 'settings' ? 'active' : ''}`} onClick={() => setView('settings')} type="button"><SlidersHorizontal size={17} />Settings</button>
         </nav>
 
-        {view === 'websockets' ? <WebSocketsWorkspace leaveGuard={wsLeaveGuard} /> : view === 'target' ? <TargetWorkspace
+        {view === 'intruder' ? <IntruderWorkspace leaveGuard={intruderLeaveGuard} /> : view === 'websockets' ? <WebSocketsWorkspace leaveGuard={wsLeaveGuard} /> : view === 'target' ? <TargetWorkspace
           refresh={targetRefresh}
           onOpenHistory={(id) => { setSelectedId(id); setView('traffic'); }}
           onSendToRepeater={(id) => { setView('traffic'); void sendHistoryToRepeater(id); }}
