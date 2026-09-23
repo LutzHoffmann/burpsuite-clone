@@ -84,6 +84,8 @@ func NewServer(cfg Config) *Server {
 	srv.mux.HandleFunc("GET /api/target/endpoints/{id}/parameters", srv.handleTargetParameters)
 	srv.mux.HandleFunc("GET /api/target/rebuild", srv.handleTargetRebuild)
 	srv.mux.HandleFunc("POST /api/intruder/jobs", srv.handleIntruderCreate)
+	srv.mux.HandleFunc("POST /api/intruder/preview", srv.handleIntruderPreview)
+	srv.mux.HandleFunc("POST /api/intruder/jobs/{id}/baseline", srv.handleIntruderBaseline)
 	srv.mux.HandleFunc("GET /api/intruder/jobs", srv.handleIntruderList)
 	srv.mux.HandleFunc("GET /api/intruder/jobs/{id}", srv.handleIntruderGet)
 	srv.mux.HandleFunc("PUT /api/intruder/jobs/{id}", srv.handleIntruderUpdate)

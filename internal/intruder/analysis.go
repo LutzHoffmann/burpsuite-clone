@@ -51,6 +51,9 @@ func Analyze(current ResultCapture, baseline *ResultCapture) Analysis {
 		right = right[:analysisBodyLimit]
 	}
 	a.Similarity = chunkSimilarity(left, right)
+	if !current.BodyStored || !baseline.BodyStored {
+		a.Similarity = 0
+	}
 	return a
 }
 

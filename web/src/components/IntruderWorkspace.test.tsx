@@ -127,3 +127,34 @@ it('preserves a handed-off request body byte-for-byte when marking a position', 
   expect(submitted!.config.positions[0].Start).toBe(new TextEncoder().encode(original.slice(0, original.indexOf('line2'))).length);
   vi.unstubAllGlobals();
 });
+
+it('edits a binary raw request in hex mode without losing bytes', async () => {
+  const id = 'e'.repeat(32);
+  const original = 'POST / HTTP/1.1\r\nHost: local.test\r\n\r\n' + String.fromCharCode(0, 255);
+  const config = { attack: 'sniper', template: { method: 'POST', url: 'http://local.test/', raw: btoa(original) }, positions: [], payloadSets: [], requestLimit: 1, concurrency: 1, ratePerSecond: 1, timeoutMs: 1000 };
+  let saved: {config: typeof config} | null = null;
+  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const path = String(input);
+    if (path === '/api/intruder/jobs' && !init?.method) return response([{ ID: id, Attack: 'sniper', State: 'draft', CompletedCount: 0, TotalRequests: 1 }]);
+    if (path === `/api/intruder/jobs/${id}` && !init?.method) return response({ id, state: 'draft', revision: 1, config });
+    if (path === `/api/intruder/jobs/${id}` && init?.method === 'PUT') { saved = JSON.parse(String(init.body)); return response({ id, state: 'draft', revision: 2, config: saved!.config }); }
+    if (path.includes('/results?')) return response({ Results: [], NextBeforeSequence: null });
+    throw new Error(`Unexpected ${path}`);
+  }));
+  vi.stubGlobal('WebSocket', undefined);
+  render(<IntruderWorkspace />);
+  await userEvent.click(await screen.findByRole('button', { name: /sniper/ }));
+  expect(await screen.findByLabelText('Request format')).toHaveValue('hex');
+  const raw = screen.getByLabelText('Raw HTTP request') as HTMLTextAreaElement;
+  await waitFor(() => expect(raw.value).toContain('00 ff'));
+  fireEvent.change(raw, { target: { value: raw.value.replace('00 ff', '01 ff') } });
+  const marker = raw.value.indexOf('01 ff');
+  raw.setSelectionRange(marker, marker + 2);
+  await userEvent.click(screen.getByRole('button', { name: 'Mark selected bytes as position' }));
+  fireEvent.change(screen.getByLabelText('Payloads, one per line'), { target: { value: 'x' } });
+  await userEvent.click(screen.getByRole('button', { name: 'Save draft' }));
+  await waitFor(() => expect(saved).not.toBeNull());
+  expect(atob(saved!.config.template.raw)).toBe(original.slice(0, -2) + String.fromCharCode(1, 255));
+  expect(saved!.config.positions[0]).toMatchObject({ Start: original.length - 2, End: original.length - 1 });
+  vi.unstubAllGlobals();
+});

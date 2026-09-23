@@ -130,6 +130,34 @@ func serviceDraft() Draft {
 	}}
 }
 
+func TestPreviewUsesServerValidationWithoutSending(t *testing.T) {
+	scope := &serviceScope{}
+	scope.allowed.Store(true)
+	sender := &serviceSender{}
+	service, err := NewService(context.Background(), &serviceStore{}, scope, sender)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+	cfg := serviceDraft().Config
+	preview, err := service.Preview(context.Background(), cfg)
+	if err != nil || preview.TotalRequests != 1 || preview.SampleMethod != "GET" || preview.SampleURL != "http://example.test/?q=a" {
+		t.Fatalf("preview = %+v, %v", preview, err)
+	}
+	if sender.calls.Load() != 0 {
+		t.Fatal("preview sent network traffic")
+	}
+	scope.allowed.Store(false)
+	if _, err := service.Preview(context.Background(), cfg); !errors.Is(err, ErrScopeDenied) {
+		t.Fatalf("scope error = %v", err)
+	}
+	scope.allowed.Store(true)
+	cfg.RequestLimit = 0
+	if _, err := service.Preview(context.Background(), cfg); err == nil {
+		t.Fatal("invalid request limit accepted")
+	}
+}
+
 func TestServiceRejectsOutOfScopeCreationAndStart(t *testing.T) {
 	store := &serviceStore{}
 	scope := &serviceScope{}

@@ -17,6 +17,45 @@ type intruderAPIFake struct {
 	createErr   error
 	created     intruder.Draft
 	resultQuery intruder.ResultQuery
+	previewed   intruder.Config
+	baseline    int64
+}
+
+func (f *intruderAPIFake) Preview(_ context.Context, cfg intruder.Config) (intruder.Preview, error) {
+	f.previewed = cfg
+	return intruder.Preview{TotalRequests: 2, SampleMethod: "GET", SampleURL: cfg.Template.URL}, nil
+}
+
+func (f *intruderAPIFake) SetBaseline(_ context.Context, id string, revision, sequence int64) (intruder.Job, error) {
+	f.baseline = sequence
+	return intruder.Job{ID: id, State: intruder.StateCompleted, Revision: revision + 1, BaselineSequence: &sequence}, nil
+}
+
+func TestIntruderPreviewAndBaselineRoutes(t *testing.T) {
+	fake := &intruderAPIFake{}
+	handler := NewServer(Config{APIAddr: "127.0.0.1:9080", Intruder: fake}).Handler()
+	post := func(path, body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
+		req.Host = "127.0.0.1:9080"
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		return rec
+	}
+	config := `{"config":{"attack":"sniper","template":{"method":"GET","url":"http://example.test/","raw":"AAE="},"positions":[],"payloadSets":[],"requestLimit":2,"concurrency":1,"ratePerSecond":1,"timeoutMs":1000}}`
+	if rec := post("/api/intruder/preview", config); rec.Code != 200 || !strings.Contains(rec.Body.String(), `"totalRequests":2`) || fake.previewed.Template.URL != "http://example.test/" {
+		t.Fatalf("preview = %d %s", rec.Code, rec.Body.String())
+	}
+	if rec := post("/api/intruder/preview", `{"config":{},"unexpected":true}`); rec.Code != 400 {
+		t.Fatalf("unknown field = %d", rec.Code)
+	}
+	id := strings.Repeat("a", 32)
+	if rec := post("/api/intruder/jobs/"+id+"/baseline", `{"revision":3,"sequence":1}`); rec.Code != 200 || fake.baseline != 1 || !strings.Contains(rec.Body.String(), `"baselineSequence":1`) {
+		t.Fatalf("baseline = %d %s", rec.Code, rec.Body.String())
+	}
+	if rec := post("/api/intruder/jobs/"+id+"/baseline", `{"revision":3,"sequence":-1}`); rec.Code != 422 {
+		t.Fatalf("invalid sequence = %d", rec.Code)
+	}
 }
 
 func (f *intruderAPIFake) ListResults(_ context.Context, _ string, query intruder.ResultQuery) (intruder.ResultPage, error) {

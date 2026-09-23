@@ -34,6 +34,48 @@ type runHandle struct {
 	intent State
 }
 
+type Preview struct {
+	TotalRequests int64  `json:"totalRequests"`
+	SampleMethod  string `json:"sampleMethod"`
+	SampleURL     string `json:"sampleUrl"`
+	Warning       string `json:"warning,omitempty"`
+}
+
+func (s *Service) Preview(_ context.Context, cfg Config) (Preview, error) {
+	total, err := ValidateConfig(cfg)
+	if err != nil {
+		return Preview{}, err
+	}
+	if !s.scope.Allows(cfg.Template.URL) {
+		return Preview{}, ErrScopeDenied
+	}
+	iterator, err := NewIterator(cfg, 0)
+	if err != nil {
+		return Preview{}, err
+	}
+	combination, ok := iterator.Next()
+	if !ok {
+		return Preview{}, invalid("payloadSets", "required")
+	}
+	request, err := BuildRequest(cfg.Template, cfg.Positions, combination)
+	if err != nil {
+		return Preview{}, err
+	}
+	if !s.scope.Allows(request.URL) {
+		return Preview{}, ErrScopeDenied
+	}
+	preview := Preview{TotalRequests: total, SampleMethod: request.Method, SampleURL: request.URL}
+	if cfg.Attack == AttackPitchfork {
+		for _, set := range cfg.PayloadSets {
+			if int64(len(set.Payloads)) > total {
+				preview.Warning = "pitchfork_shortest_set"
+				break
+			}
+		}
+	}
+	return preview, nil
+}
+
 func NewService(ctx context.Context, store Store, scope ScopeClassifier, sender repeater.Sender, publishers ...EventPublisher) (*Service, error) {
 	if store == nil || scope == nil || sender == nil {
 		return nil, errors.New("intruder dependencies unavailable")
@@ -122,6 +164,16 @@ func (s *Service) ListResults(ctx context.Context, id string, query ResultQuery)
 
 func (s *Service) GetResult(ctx context.Context, id string, sequence int64) (Result, error) {
 	return s.store.GetResult(ctx, id, sequence)
+}
+
+func (s *Service) SetBaseline(ctx context.Context, id string, revision, sequence int64) (Job, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	job, err := s.store.SetBaseline(ctx, id, revision, sequence)
+	if err == nil {
+		s.publishJob(job)
+	}
+	return job, err
 }
 
 func (s *Service) Delete(ctx context.Context, id string) error {

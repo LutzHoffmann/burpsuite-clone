@@ -254,6 +254,32 @@ func (s *SQLiteStore) AppendResult(ctx context.Context, id string, r intruder.Re
 		stored = false
 		charge = 0
 	}
+	var baselineSequence sql.NullInt64
+	if err := tx.QueryRowContext(ctx, `SELECT baseline_sequence FROM intruder_jobs WHERE id=? AND project_id=1`, id).Scan(&baselineSequence); err != nil {
+		return intruder.Job{}, err
+	}
+	if !baselineSequence.Valid && r.ErrorCategory == "" && r.Status >= 100 {
+		baselineSequence = sql.NullInt64{Int64: r.Sequence, Valid: true}
+		if _, err := tx.ExecContext(ctx, `UPDATE intruder_jobs SET baseline_sequence=? WHERE id=? AND project_id=1 AND baseline_sequence IS NULL`, r.Sequence, id); err != nil {
+			return intruder.Job{}, err
+		}
+	}
+	if baselineSequence.Valid {
+		current := intruder.ResultCapture{Status: r.Status, MIMEType: r.MIMEType, Body: r.ResponseCapture, BodyStored: stored, Truncated: r.ResponseTruncated, Size: r.ResponseSize, Duration: r.Duration}
+		baseline := current
+		if baselineSequence.Int64 != r.Sequence {
+			var durationMS int64
+			err := tx.QueryRowContext(ctx, `SELECT status,mime_type,response_capture,body_stored,response_truncated,response_size,duration_ms FROM intruder_results WHERE job_id=? AND sequence=?`, id, baselineSequence.Int64).Scan(&baseline.Status, &baseline.MIMEType, &baseline.Body, &baseline.BodyStored, &baseline.Truncated, &baseline.Size, &durationMS)
+			if err != nil {
+				return intruder.Job{}, err
+			}
+			baseline.Duration = time.Duration(durationMS) * time.Millisecond
+		}
+		analysis := intruder.Analyze(current, &baseline)
+		r.Similarity, r.SimilarityPartial, r.StatusDiff, r.LengthDelta, r.DurationDelta, r.MIMEDiff = analysis.Similarity, analysis.SimilarityPartial, analysis.StatusDiff, analysis.LengthDelta, analysis.DurationDelta, analysis.MIMEDiff
+	} else {
+		r.SimilarityPartial = true
+	}
 	_, err = tx.ExecContext(ctx, `INSERT INTO intruder_results(job_id,sequence,selections_json,method,url,status,mime_type,request_size,response_size,duration_ms,error_category,response_truncated,request_capture,response_capture,body_stored,storage_status,similarity,similarity_partial,status_diff,length_delta,duration_delta,mime_diff,capture_bytes,created_at_unix_nano) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, id, r.Sequence, string(selections), r.Method, r.URL, r.Status, r.MIMEType, r.RequestSize, r.ResponseSize, r.Duration.Milliseconds(), r.ErrorCategory, r.ResponseTruncated, r.RequestCapture, r.ResponseCapture, stored, r.StorageStatus, r.Similarity, r.SimilarityPartial, r.StatusDiff, r.LengthDelta, r.DurationDelta, r.MIMEDiff, charge, r.CreatedAt.UnixNano())
 	if err != nil {
 		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
@@ -277,6 +303,79 @@ func (s *SQLiteStore) AppendResult(ctx context.Context, id string, r intruder.Re
 		return intruder.Job{}, intruder.ErrSequenceConflict
 	}
 	if err = tx.Commit(); err != nil {
+		return intruder.Job{}, err
+	}
+	return s.GetJob(ctx, id)
+}
+
+func (s *SQLiteStore) SetBaseline(ctx context.Context, id string, revision, sequence int64) (intruder.Job, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return intruder.Job{}, err
+	}
+	defer tx.Rollback()
+	var state intruder.State
+	var currentRevision int64
+	if err := tx.QueryRowContext(ctx, `SELECT state,revision FROM intruder_jobs WHERE id=? AND project_id=1`, id).Scan(&state, &currentRevision); err != nil {
+		return intruder.Job{}, err
+	}
+	if currentRevision != revision {
+		return intruder.Job{}, intruder.ErrRevisionConflict
+	}
+	if state != intruder.StateCompleted && state != intruder.StateAborted && state != intruder.StateFailed {
+		return intruder.Job{}, intruder.ErrStateConflict
+	}
+	var baseline intruder.ResultCapture
+	var durationMS int64
+	if err := tx.QueryRowContext(ctx, `SELECT status,mime_type,response_capture,body_stored,response_truncated,response_size,duration_ms FROM intruder_results WHERE job_id=? AND sequence=?`, id, sequence).Scan(&baseline.Status, &baseline.MIMEType, &baseline.Body, &baseline.BodyStored, &baseline.Truncated, &baseline.Size, &durationMS); err != nil {
+		return intruder.Job{}, err
+	}
+	baseline.Duration = time.Duration(durationMS) * time.Millisecond
+	type comparison struct {
+		sequence int64
+		value    intruder.Analysis
+	}
+	last := int64(-1)
+	for {
+		rows, err := tx.QueryContext(ctx, `SELECT sequence,status,mime_type,response_capture,body_stored,response_truncated,response_size,duration_ms FROM intruder_results WHERE job_id=? AND sequence>? ORDER BY sequence LIMIT 64`, id, last)
+		if err != nil {
+			return intruder.Job{}, err
+		}
+		comparisons := make([]comparison, 0, 64)
+		for rows.Next() {
+			var item intruder.ResultCapture
+			var seq, ms int64
+			if err := rows.Scan(&seq, &item.Status, &item.MIMEType, &item.Body, &item.BodyStored, &item.Truncated, &item.Size, &ms); err != nil {
+				rows.Close()
+				return intruder.Job{}, err
+			}
+			item.Duration = time.Duration(ms) * time.Millisecond
+			comparisons = append(comparisons, comparison{seq, intruder.Analyze(item, &baseline)})
+			last = seq
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return intruder.Job{}, err
+		}
+		rows.Close()
+		for _, item := range comparisons {
+			a := item.value
+			if _, err := tx.ExecContext(ctx, `UPDATE intruder_results SET similarity=?,similarity_partial=?,status_diff=?,length_delta=?,duration_delta=?,mime_diff=? WHERE job_id=? AND sequence=?`, a.Similarity, a.SimilarityPartial, a.StatusDiff, a.LengthDelta, a.DurationDelta, a.MIMEDiff, id, item.sequence); err != nil {
+				return intruder.Job{}, err
+			}
+		}
+		if len(comparisons) < 64 {
+			break
+		}
+	}
+	result, err := tx.ExecContext(ctx, `UPDATE intruder_jobs SET baseline_sequence=?,revision=revision+1,updated_at_unix_nano=? WHERE id=? AND project_id=1 AND revision=?`, sequence, time.Now().UnixNano(), id, revision)
+	if err != nil {
+		return intruder.Job{}, err
+	}
+	if count, _ := result.RowsAffected(); count != 1 {
+		return intruder.Job{}, intruder.ErrRevisionConflict
+	}
+	if err := tx.Commit(); err != nil {
 		return intruder.Job{}, err
 	}
 	return s.GetJob(ctx, id)

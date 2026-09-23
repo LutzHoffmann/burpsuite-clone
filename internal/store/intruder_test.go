@@ -229,8 +229,8 @@ func TestIntruderResultFiltersAndCursor(t *testing.T) {
 	ctx := context.Background()
 	job := runningIntruderJob(t, s, "filter-job")
 	rows := []intruder.Result{
-		{Sequence: 0, Method: "GET", URL: "https://example.test/?q=alpha", Status: 200, MIMEType: "text/plain", ResponseSize: 10, Duration: 5 * time.Millisecond, Similarity: 10000, Selections: []intruder.Selection{{PositionID: "p1", Payload: []byte("alpha")}}},
-		{Sequence: 1, Method: "GET", URL: "https://example.test/?q=beta", Status: 500, MIMEType: "application/json", ResponseSize: 50, Duration: 25 * time.Millisecond, Similarity: 4000, ErrorCategory: "network", Selections: []intruder.Selection{{PositionID: "p1", Payload: []byte("beta")}}},
+		{Sequence: 0, Method: "GET", URL: "https://example.test/?q=alpha", Status: 200, MIMEType: "text/plain", ResponseSize: 10, Duration: 5 * time.Millisecond, ResponseCapture: []byte("alpha"), BodyStored: true, Selections: []intruder.Selection{{PositionID: "p1", Payload: []byte("alpha")}}},
+		{Sequence: 1, Method: "GET", URL: "https://example.test/?q=beta", Status: 500, MIMEType: "application/json", ResponseSize: 50, Duration: 25 * time.Millisecond, ResponseCapture: []byte("beta"), BodyStored: true, ErrorCategory: "network", Selections: []intruder.Selection{{PositionID: "p1", Payload: []byte("beta")}}},
 	}
 	for _, row := range rows {
 		if _, err := s.AppendResult(ctx, job.ID, row); err != nil {
@@ -246,7 +246,7 @@ func TestIntruderResultFiltersAndCursor(t *testing.T) {
 		{"mime", intruder.ResultQuery{MIMEType: "application/json"}, 1},
 		{"size", intruder.ResultQuery{MinSize: 40, MaxSize: 60}, 1},
 		{"duration", intruder.ResultQuery{MinDurationMS: 20, MaxDurationMS: 30}, 1},
-		{"similarity", intruder.ResultQuery{MinSimilarity: 3000, MaxSimilarity: 5000}, 1},
+		{"similarity", intruder.ResultQuery{MaxSimilarity: 1}, 1},
 		{"payload", intruder.ResultQuery{PayloadSearch: "beta"}, 1},
 	}
 	for _, tc := range tests {
@@ -264,6 +264,58 @@ func TestIntruderResultFiltersAndCursor(t *testing.T) {
 	page, err = s.ListResults(ctx, job.ID, intruder.ResultQuery{Limit: 1, BeforeSequence: page.NextBeforeSequence})
 	if err != nil || len(page.Results) != 1 || page.Results[0].Sequence != 0 || page.NextBeforeSequence != nil {
 		t.Fatalf("second page = %+v, %v", page, err)
+	}
+}
+
+func TestIntruderBaselineSelectionRecalculatesResults(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	job := runningIntruderJob(t, s, "baseline-job")
+	first := intruder.Result{Sequence: 0, Method: "GET", URL: "https://example.test/", Status: 200, MIMEType: "text/plain", ResponseSize: 5, Duration: 10 * time.Millisecond, ResponseCapture: []byte("alpha"), BodyStored: true}
+	second := intruder.Result{Sequence: 1, Method: "GET", URL: "https://example.test/", Status: 500, MIMEType: "application/json", ResponseSize: 4, Duration: 20 * time.Millisecond, ResponseCapture: []byte("beta"), BodyStored: true}
+	var err error
+	job, err = s.AppendResult(ctx, job.ID, first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if job.BaselineSequence == nil || *job.BaselineSequence != 0 {
+		t.Fatalf("default baseline = %+v", job.BaselineSequence)
+	}
+	job, err = s.AppendResult(ctx, job.ID, second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := s.GetResult(ctx, job.ID, 1)
+	if err != nil || !before.StatusDiff || !before.MIMEDiff || before.LengthDelta != -1 || before.DurationDelta != 10 {
+		t.Fatalf("before = %+v, %v", before, err)
+	}
+	if _, err := s.SetBaseline(ctx, job.ID, job.Revision, 1); !errors.Is(err, intruder.ErrStateConflict) {
+		t.Fatalf("running selection = %v", err)
+	}
+	job, err = s.Transition(ctx, job.ID, job.Revision, intruder.StateRunning, intruder.StateCompleted, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.SetBaseline(ctx, job.ID, job.Revision-1, 1); !errors.Is(err, intruder.ErrRevisionConflict) {
+		t.Fatalf("stale selection = %v", err)
+	}
+	if _, err := s.SetBaseline(ctx, job.ID, job.Revision, 9); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("missing result = %v", err)
+	}
+	job, err = s.SetBaseline(ctx, job.ID, job.Revision, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if job.BaselineSequence == nil || *job.BaselineSequence != 1 {
+		t.Fatalf("selected baseline = %+v", job.BaselineSequence)
+	}
+	after, err := s.GetResult(ctx, job.ID, 1)
+	if err != nil || after.Similarity != 10000 || after.StatusDiff || after.MIMEDiff {
+		t.Fatalf("selected result = %+v, %v", after, err)
+	}
+	other, err := s.GetResult(ctx, job.ID, 0)
+	if err != nil || !other.StatusDiff || other.LengthDelta != 1 || other.DurationDelta != -10 {
+		t.Fatalf("recalculated result = %+v, %v", other, err)
 	}
 }
 

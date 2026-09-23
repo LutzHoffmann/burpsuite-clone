@@ -12,6 +12,7 @@ import (
 )
 
 type IntruderService interface {
+	Preview(context.Context, intruder.Config) (intruder.Preview, error)
 	Create(context.Context, intruder.Draft) (intruder.Job, error)
 	Update(context.Context, string, int64, intruder.Config) (intruder.Job, error)
 	Delete(context.Context, string) error
@@ -23,6 +24,7 @@ type IntruderService interface {
 	Abort(context.Context, string, int64) (intruder.Job, error)
 	ListResults(context.Context, string, intruder.ResultQuery) (intruder.ResultPage, error)
 	GetResult(context.Context, string, int64) (intruder.Result, error)
+	SetBaseline(context.Context, string, int64, int64) (intruder.Job, error)
 }
 
 type intruderConfigDTO struct {
@@ -62,17 +64,66 @@ func intruderConfigOutput(c intruder.Config) intruderConfigDTO {
 
 func intruderJobOutput(job intruder.Job) interface{} {
 	return struct {
-		ID             string            `json:"id"`
-		Config         intruderConfigDTO `json:"config"`
-		State          intruder.State    `json:"state"`
-		StateReason    string            `json:"stateReason"`
-		Revision       int64             `json:"revision"`
-		TotalRequests  int64             `json:"totalRequests"`
-		NextSequence   int64             `json:"nextSequence"`
-		CompletedCount int64             `json:"completedCount"`
-		ErrorCount     int64             `json:"errorCount"`
+		ID               string            `json:"id"`
+		Config           intruderConfigDTO `json:"config"`
+		State            intruder.State    `json:"state"`
+		StateReason      string            `json:"stateReason"`
+		Revision         int64             `json:"revision"`
+		TotalRequests    int64             `json:"totalRequests"`
+		NextSequence     int64             `json:"nextSequence"`
+		CompletedCount   int64             `json:"completedCount"`
+		ErrorCount       int64             `json:"errorCount"`
+		BaselineSequence *int64            `json:"baselineSequence"`
 	}{job.ID, intruderConfigOutput(job.Config), job.State, job.StateReason, job.Revision,
-		job.TotalRequests, job.NextSequence, job.CompletedCount, job.ErrorCount}
+		job.TotalRequests, job.NextSequence, job.CompletedCount, job.ErrorCount, job.BaselineSequence}
+}
+
+func (s *Server) handleIntruderPreview(w http.ResponseWriter, r *http.Request) {
+	if !s.intruderReady(w) {
+		return
+	}
+	var body struct {
+		Config intruderConfigDTO `json:"config"`
+	}
+	if !s.decodeIntruder(w, r, &body) {
+		return
+	}
+	if !validIntruderTimeout(w, body.Config.TimeoutMS) {
+		return
+	}
+	preview, err := s.cfg.Intruder.Preview(r.Context(), body.Config.domain())
+	if err != nil {
+		intruderError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, preview)
+}
+
+func (s *Server) handleIntruderBaseline(w http.ResponseWriter, r *http.Request) {
+	if !s.intruderReady(w) {
+		return
+	}
+	id, ok := intruderID(w, r)
+	if !ok {
+		return
+	}
+	var body struct {
+		Revision int64 `json:"revision"`
+		Sequence int64 `json:"sequence"`
+	}
+	if !s.decodeIntruder(w, r, &body) {
+		return
+	}
+	if body.Sequence < 0 {
+		intruderError(w, &intruder.FieldError{Field: "sequence", Code: "range"})
+		return
+	}
+	job, err := s.cfg.Intruder.SetBaseline(r.Context(), id, body.Revision, body.Sequence)
+	if err != nil {
+		intruderError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, intruderJobOutput(job))
 }
 
 func (s *Server) intruderReady(w http.ResponseWriter) bool {

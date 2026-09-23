@@ -176,6 +176,7 @@ type Store interface {
 	GetJob(context.Context, string) (Job, error)
 	Transition(context.Context, string, int64, State, State, string) (Job, error)
 	AppendResult(context.Context, string, Result) (Job, error)
+	SetBaseline(context.Context, string, int64, int64) (Job, error)
 	ListResults(context.Context, string, ResultQuery) (ResultPage, error)
 	GetResult(context.Context, string, int64) (Result, error)
 	RecoverRunning(context.Context) error

@@ -15,15 +15,21 @@ server and a narrow include rule.
    the URL authority. Handoff creates an unsaved draft; it never starts traffic.
 3. Select bytes in the request editor and mark a position. Enter one payload per
    line for each position in text/UTF-8 or hex-byte mode. Hex input requires
-   complete byte pairs; empty lines are empty payloads. The raw request editor
-   normalizes HTTP line endings to CRLF before calculating byte offsets.
+   complete byte pairs; empty lines are empty payloads. The whole raw request
+   also has a byte-safe hex mode. Text edits normalize HTTP header line endings
+   to CRLF; hex edits preserve every byte exactly.
 4. Choose Sniper, Battering Ram, Pitchfork, or Cluster Bomb. Set the request
-   limit, concurrency, rate, and per-request timeout. Save the draft, then start
-   it explicitly. Review results in pages of at most 100.
+   limit, concurrency, rate, and per-request timeout. Use **Preflight preview**
+   for the server-validated count and first generated destination. Save the
+   draft, then start it explicitly. Cluster Bomb runs above 10,000 requests
+   require an additional confirmation. Review results in pages of at most 100.
 5. Pause to let in-flight requests finish, resume from the next persisted
    sequence, or abort to cancel in-flight work. Filter paged results by status,
    error, MIME, or payload text and open a result for a bounded body preview.
    Jobs never resume automatically after application restart.
+6. The first successful response becomes the default comparison baseline.
+   After a job ends, choose any result as a new baseline. Similarity is
+   advisory; a missing or truncated capture is marked partial.
 
 ## Attack semantics
 
@@ -44,8 +50,7 @@ is checked again immediately before dispatch; removing it from scope pauses the
 job. Results are saved locally in the active project. Capture quota may omit
 body bytes while retaining metadata and a storage warning.
 
-The current workspace supports text and hex payloads, History and Repeater
-handoff, basic server-side result filters, and bounded result inspection. A
-byte-safe hex editor for the entire raw request, baseline comparison controls,
-and a polished preflight preview remain planned; do not treat this
-implementation as feature parity with Burp Suite.
+The preview performs no network requests and checks the first generated
+request, not every possible substitution. Individual later requests can still
+fail validation during execution. This implementation is not feature parity
+with Burp Suite.

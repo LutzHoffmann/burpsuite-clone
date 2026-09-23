@@ -15,8 +15,9 @@ export interface IntruderConfig {
 }
 export interface IntruderJob {
   id: string; config: IntruderConfig; state: JobState; stateReason: string; revision: number;
-  totalRequests: number; nextSequence: number; completedCount: number; errorCount: number;
+  totalRequests: number; nextSequence: number; completedCount: number; errorCount: number; baselineSequence: number | null;
 }
+export interface IntruderPreview { totalRequests: number; sampleMethod: string; sampleUrl: string; warning?: string }
 export interface IntruderJobSummary {
   ID: string; Attack: AttackType; State: JobState; StateReason: string; Revision: number;
   TotalRequests: number; CompletedCount: number; ErrorCount: number; UpdatedAt: string;
@@ -44,6 +45,8 @@ const json = (method: string, body: unknown): RequestInit => ({ method, headers:
 export const listIntruderJobs = (signal?: AbortSignal) => request<IntruderJobSummary[]>('/api/intruder/jobs', { signal });
 export const getIntruderJob = (id: string, signal?: AbortSignal) => request<IntruderJob>(`/api/intruder/jobs/${id}`, { signal });
 export const createIntruderJob = (config: IntruderConfig) => request<IntruderJob>('/api/intruder/jobs', json('POST', { config }));
+export const previewIntruder = (config: IntruderConfig) => request<IntruderPreview>('/api/intruder/preview', json('POST', { config }));
+export const setIntruderBaseline = (job: IntruderJob, sequence: number) => request<IntruderJob>(`/api/intruder/jobs/${job.id}/baseline`, json('POST', { revision: job.revision, sequence }));
 export const updateIntruderJob = (job: IntruderJob, config: IntruderConfig) => request<IntruderJob>(`/api/intruder/jobs/${job.id}`, json('PUT', { revision: job.revision, config }));
 export const controlIntruderJob = (job: IntruderJob, action: 'start' | 'pause' | 'resume' | 'abort') => request<IntruderJob>(`/api/intruder/jobs/${job.id}/${action}`, json('POST', { revision: job.revision }));
 export const deleteIntruderJob = (id: string) => request<void>(`/api/intruder/jobs/${id}`, { method: 'DELETE' });
