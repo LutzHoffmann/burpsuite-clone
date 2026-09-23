@@ -14,8 +14,39 @@ import (
 
 type intruderAPIFake struct {
 	IntruderService
-	createErr error
-	created   intruder.Draft
+	createErr   error
+	created     intruder.Draft
+	resultQuery intruder.ResultQuery
+}
+
+func (f *intruderAPIFake) ListResults(_ context.Context, _ string, query intruder.ResultQuery) (intruder.ResultPage, error) {
+	f.resultQuery = query
+	return intruder.ResultPage{Results: []intruder.Result{}}, nil
+}
+
+func TestIntruderResultFiltersAreValidatedAndForwarded(t *testing.T) {
+	fake := &intruderAPIFake{}
+	handler := NewServer(Config{APIAddr: "127.0.0.1:9080", Intruder: fake}).Handler()
+	base := "/api/intruder/jobs/" + strings.Repeat("a", 32) + "/results"
+	request := func(query string) int {
+		req := httptest.NewRequest(http.MethodGet, base+query, nil)
+		req.Host = "127.0.0.1:9080"
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		return rec.Code
+	}
+	if got := request("?limit=25&beforeSequence=9&status=404&minSize=3&maxSize=20&minDurationMs=5&maxDurationMs=90&minSimilarity=10&maxSimilarity=80&payloadSearch=needle&errorCategory=network&mimeType=text%2Fplain"); got != 200 {
+		t.Fatalf("valid filter status=%d", got)
+	}
+	q := fake.resultQuery
+	if q.Limit != 25 || q.BeforeSequence == nil || *q.BeforeSequence != 9 || q.Status != 404 || q.MinSize != 3 || q.MaxSize != 20 || q.MinDurationMS != 5 || q.MaxDurationMS != 90 || q.MinSimilarity != 10 || q.MaxSimilarity != 80 || q.PayloadSearch != "needle" || q.ErrorCategory != "network" || q.MIMEType != "text/plain" {
+		t.Fatalf("forwarded query=%+v", q)
+	}
+	for _, value := range []string{"?limit=101", "?status=999", "?minSize=20&maxSize=3", "?minSimilarity=101", "?payloadSearch=", "?unknown=1", "?limit=2&limit=3"} {
+		if got := request(value); got != 400 {
+			t.Fatalf("%s: status=%d", value, got)
+		}
+	}
 }
 
 func (f *intruderAPIFake) Create(_ context.Context, draft intruder.Draft) (intruder.Job, error) {

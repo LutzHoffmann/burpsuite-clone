@@ -270,18 +270,42 @@ func (s *Server) handleIntruderResults(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	query := intruder.ResultQuery{Limit: 100}
-	allowed := map[string]bool{"beforeSequence": true, "limit": true, "status": true, "errorCategory": true, "mimeType": true}
-	for key, values := range r.URL.Query() {
-		if !allowed[key] || len(values) != 1 {
+	allowed := map[string]bool{"beforeSequence": true, "limit": true, "status": true, "errorCategory": true, "mimeType": true,
+		"minSize": true, "maxSize": true, "minDurationMs": true, "maxDurationMs": true,
+		"minSimilarity": true, "maxSimilarity": true, "payloadSearch": true}
+	params := r.URL.Query()
+	for key, values := range params {
+		if !allowed[key] || len(values) != 1 || values[0] == "" {
 			http.Error(w, "invalid query", 400)
 			return
 		}
 	}
 	for key, target := range map[string]*int{"limit": &query.Limit, "status": &query.Status} {
-		if value := r.URL.Query().Get(key); value != "" {
+		if value := params.Get(key); value != "" {
 			n, err := strconv.Atoi(value)
 			if err != nil || n < 0 {
 				http.Error(w, "invalid query", 400)
+				return
+			}
+			*target = n
+		}
+	}
+	for key, target := range map[string]*int64{"minSize": &query.MinSize, "maxSize": &query.MaxSize,
+		"minDurationMs": &query.MinDurationMS, "maxDurationMs": &query.MaxDurationMS} {
+		if value := params.Get(key); value != "" {
+			n, err := strconv.ParseInt(value, 10, 64)
+			if err != nil || n < 0 {
+				http.Error(w, "invalid query", 400)
+				return
+			}
+			*target = n
+		}
+	}
+	for key, target := range map[string]*int{"minSimilarity": &query.MinSimilarity, "maxSimilarity": &query.MaxSimilarity} {
+		if value := params.Get(key); value != "" {
+			n, err := strconv.Atoi(value)
+			if err != nil || n < 0 || n > 100 {
+				http.Error(w, "invalid similarity", 400)
 				return
 			}
 			*target = n
@@ -291,7 +315,14 @@ func (s *Server) handleIntruderResults(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid limit", 400)
 		return
 	}
-	if value := r.URL.Query().Get("beforeSequence"); value != "" {
+	if query.Status != 0 && (query.Status < 100 || query.Status > 599) ||
+		query.MaxSize > 0 && query.MinSize > query.MaxSize ||
+		query.MaxDurationMS > 0 && query.MinDurationMS > query.MaxDurationMS ||
+		query.MaxSimilarity > 0 && query.MinSimilarity > query.MaxSimilarity {
+		http.Error(w, "invalid filter range", 400)
+		return
+	}
+	if value := params.Get("beforeSequence"); value != "" {
 		n, err := strconv.ParseInt(value, 10, 64)
 		if err != nil || n < 0 {
 			http.Error(w, "invalid cursor", 400)
@@ -299,8 +330,13 @@ func (s *Server) handleIntruderResults(w http.ResponseWriter, r *http.Request) {
 		}
 		query.BeforeSequence = &n
 	}
-	query.ErrorCategory = r.URL.Query().Get("errorCategory")
-	query.MIMEType = r.URL.Query().Get("mimeType")
+	query.ErrorCategory = params.Get("errorCategory")
+	query.MIMEType = params.Get("mimeType")
+	query.PayloadSearch = params.Get("payloadSearch")
+	if len(query.ErrorCategory) > 64 || len(query.MIMEType) > 256 || len(query.PayloadSearch) > 128 {
+		http.Error(w, "filter too long", 400)
+		return
+	}
 	page, err := s.cfg.Intruder.ListResults(r.Context(), id, query)
 	if err != nil {
 		intruderError(w, err)
