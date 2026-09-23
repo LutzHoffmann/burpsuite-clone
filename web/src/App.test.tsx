@@ -281,7 +281,7 @@ test('opens a complete History request as an Intruder draft without sending it',
   const host = await screen.findByText('replay.test');
   fireEvent.click(within(host.closest('tr')!).getByRole('button', { name: 'Send to Intruder' }));
   expect(await screen.findByRole('heading', { name: 'Intruder' })).toBeInTheDocument();
-  expect(screen.getByLabelText('Destination URL')).toHaveValue('https://replay.test/submit');
+  await waitFor(() => expect(screen.getByLabelText('Destination URL')).toHaveValue('https://replay.test/submit'));
   expect(screen.getByLabelText('Raw HTTP request')).toHaveValue(raw.replace(/\r\n/g, '\n'));
   expect(countFetches(fetchMock, '/api/intruder/jobs', 'POST')).toBe(0);
 });
