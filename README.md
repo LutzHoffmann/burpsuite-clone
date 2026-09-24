@@ -13,6 +13,10 @@ attack modes, rate limits, pause/resume/abort controls, History/Repeater handoff
 text and hex payloads, and paged results. See
 [Intruder setup and current limits](docs/setup/intruder.md).
 
+The History inspector includes a passive Findings tab for captured, in-scope
+responses. It currently checks selected HTTPS cookie and security-header
+conditions without sending traffic or claiming confirmed vulnerabilities.
+
 WebSocket forwarding supports `ws://` and `wss://`, with a read-only message
 inspector and an independent WebSocket Repeater with one-shot and manual session
 modes. Session mode keeps one connection open for multiple sends and unsolicited
