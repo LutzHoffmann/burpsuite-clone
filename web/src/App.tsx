@@ -25,6 +25,7 @@ import { HistoryTable } from './components/HistoryTable';
 import { InterceptPanel } from './components/InterceptPanel';
 import { InterceptRules, matchAllRule } from './components/InterceptRules';
 import { IntruderWorkspace } from './components/IntruderWorkspace';
+import { FindingsWorkspace } from './components/FindingsWorkspace';
 import { Inspector } from './components/Inspector';
 import { Repeater } from './components/Repeater';
 import { Settings } from './components/Settings';
@@ -152,7 +153,7 @@ export function App() {
   const [intruderSource, setIntruderSource] = useState<IntruderSource | null>(null);
   const intruderHandoffRevision = useRef(0);
   const [apiErrors, setAPIErrors] = useState<Record<string, string | undefined>>({});
-  const [view, setViewState] = useState<'traffic' | 'target' | 'websockets' | 'intruder' | 'settings'>('traffic');
+  const [view, setViewState] = useState<'traffic' | 'target' | 'websockets' | 'intruder' | 'findings' | 'settings'>('traffic');
   const wsLeaveGuard = useRef<() => boolean>(() => true);
   const intruderLeaveGuard = useRef<() => boolean>(() => true);
   const setView = (next: typeof view) => {
@@ -431,13 +432,14 @@ export function App() {
           <button className={`nav-item ${view === 'websockets' ? 'active' : ''}`} onClick={() => setView('websockets')} type="button"><Network size={17} />WebSockets</button>
           <button className={`nav-item ${view === 'target' ? 'active' : ''}`} onClick={openTarget} type="button"><Map size={17} />Target</button>
           <button className={`nav-item ${view === 'intruder' ? 'active' : ''}`} onClick={() => setView('intruder')} type="button"><Crosshair size={17} />Intruder</button>
+          <button className={`nav-item ${view === 'findings' ? 'active' : ''}`} onClick={() => setView('findings')} type="button"><Search size={17} />Findings</button>
           <button className="nav-item" type="button"><Send size={17} />Repeater</button>
           <button className="nav-item" type="button"><Boxes size={17} />Extensions</button>
           <div className="nav-spacer" />
           <button className={`nav-item ${view === 'settings' ? 'active' : ''}`} onClick={() => setView('settings')} type="button"><SlidersHorizontal size={17} />Settings</button>
         </nav>
 
-        {view === 'intruder' ? <IntruderWorkspace leaveGuard={intruderLeaveGuard} source={intruderSource} onConsumeSource={() => setIntruderSource(null)} /> : view === 'websockets' ? <WebSocketsWorkspace leaveGuard={wsLeaveGuard} /> : view === 'target' ? <TargetWorkspace
+        {view === 'intruder' ? <IntruderWorkspace leaveGuard={intruderLeaveGuard} source={intruderSource} onConsumeSource={() => setIntruderSource(null)} /> : view === 'findings' ? <FindingsWorkspace onOpenHistory={(id) => { setSelectedId(id); setView('traffic'); }} /> : view === 'websockets' ? <WebSocketsWorkspace leaveGuard={wsLeaveGuard} /> : view === 'target' ? <TargetWorkspace
           refresh={targetRefresh}
           onOpenHistory={(id) => { setSelectedId(id); setView('traffic'); }}
           onSendToRepeater={(id) => { setView('traffic'); void sendHistoryToRepeater(id); }}

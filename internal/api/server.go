@@ -48,6 +48,7 @@ func NewServer(cfg Config) *Server {
 	srv.mux.HandleFunc("GET /api/ca.pem", srv.handleCADownload)
 	srv.mux.HandleFunc("GET /api/history", srv.handleHistory)
 	srv.mux.HandleFunc("GET /api/history/page", srv.handleHistoryPage)
+	srv.mux.HandleFunc("GET /api/findings", srv.handleFindings)
 	srv.mux.HandleFunc("GET /api/websockets", srv.handleWSConnections)
 	srv.mux.HandleFunc("GET /api/websockets/{id}", srv.handleWSConnection)
 	srv.mux.HandleFunc("GET /api/websockets/{id}/messages", srv.handleWSMessages)

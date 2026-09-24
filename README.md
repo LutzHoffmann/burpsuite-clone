@@ -16,6 +16,10 @@ text and hex payloads, and paged results. See
 The History inspector includes a passive Findings tab for captured, in-scope
 responses. It currently checks selected HTTPS cookie and security-header
 conditions without sending traffic or claiming confirmed vulnerabilities.
+The project-wide Findings view groups the same observations by host and type,
+supports filtering, and links each group to the latest matching History entry.
+It computes results from retained response headers, including older captures;
+no separate scan requests or finding storage are created.
 
 WebSocket forwarding supports `ws://` and `wss://`, with a read-only message
 inspector and an independent WebSocket Repeater with one-shot and manual session
