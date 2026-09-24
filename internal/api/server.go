@@ -16,18 +16,19 @@ import (
 )
 
 type Config struct {
-	Store        store.Store
-	Authority    *certs.Authority
-	Events       *events.Hub
-	Repeater     *repeater.Service
-	WSRepeater   *wsrepeater.Service
-	WSSessions   WSSessionService
-	APIAddr      string
-	ProxyAddr    string
-	Intercept    *intercept.Controller
-	Target       *target.Service
-	Intruder     IntruderService
-	MaxBodyBytes int64
+	Store         store.Store
+	Authority     *certs.Authority
+	Events        *events.Hub
+	Repeater      *repeater.Service
+	WSRepeater    *wsrepeater.Service
+	WSSessions    WSSessionService
+	APIAddr       string
+	ProxyAddr     string
+	Intercept     *intercept.Controller
+	Target        *target.Service
+	Intruder      IntruderService
+	ActiveScanner ActiveScanner
+	MaxBodyBytes  int64
 }
 
 type Server struct {
@@ -49,6 +50,7 @@ func NewServer(cfg Config) *Server {
 	srv.mux.HandleFunc("GET /api/history", srv.handleHistory)
 	srv.mux.HandleFunc("GET /api/history/page", srv.handleHistoryPage)
 	srv.mux.HandleFunc("GET /api/findings", srv.handleFindings)
+	srv.mux.HandleFunc("POST /api/active-scan", srv.handleActiveScan)
 	srv.mux.HandleFunc("GET /api/websockets", srv.handleWSConnections)
 	srv.mux.HandleFunc("GET /api/websockets/{id}", srv.handleWSConnection)
 	srv.mux.HandleFunc("GET /api/websockets/{id}/messages", srv.handleWSMessages)

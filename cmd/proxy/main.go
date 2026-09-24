@@ -15,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/lutzifer/burpsuite-clone/internal/activescan"
 	"github.com/lutzifer/burpsuite-clone/internal/api"
 	"github.com/lutzifer/burpsuite-clone/internal/certs"
 	"github.com/lutzifer/burpsuite-clone/internal/config"
@@ -58,6 +59,10 @@ func main() {
 		log.Fatalf("recover Intruder jobs: %v", err)
 	}
 	defer intruderService.Close()
+	activeScanner, err := activescan.New(history, intruderScope{scopeManager}, repeater.NewHTTPSender(nil))
+	if err != nil {
+		log.Fatalf("initialize active scanner: %v", err)
+	}
 	targetService := target.NewService(history, scopeManager, hub, target.Limits{
 		MaxJSONDepth: 16, MaxFields: 1000, MaxMultipartFields: 100,
 	})
@@ -102,18 +107,19 @@ func main() {
 	wsSessions := wsrepeater.NewSessionManager(scopeManager, cfg.BodyLimitBytes)
 	defer wsSessions.Close()
 	apiServer := api.NewServer(api.Config{
-		Store:        history,
-		Authority:    authority,
-		Events:       hub,
-		Repeater:     repeater.NewService(nil, cfg.BodyLimitBytes),
-		WSRepeater:   wsrepeater.NewService(scopeManager, cfg.BodyLimitBytes),
-		WSSessions:   wsSessions,
-		APIAddr:      cfg.APIAddr,
-		ProxyAddr:    cfg.ProxyAddr,
-		Intercept:    interceptController,
-		Target:       targetService,
-		Intruder:     intruderService,
-		MaxBodyBytes: cfg.BodyLimitBytes,
+		Store:         history,
+		Authority:     authority,
+		Events:        hub,
+		Repeater:      repeater.NewService(nil, cfg.BodyLimitBytes),
+		WSRepeater:    wsrepeater.NewService(scopeManager, cfg.BodyLimitBytes),
+		WSSessions:    wsSessions,
+		APIAddr:       cfg.APIAddr,
+		ProxyAddr:     cfg.ProxyAddr,
+		Intercept:     interceptController,
+		Target:        targetService,
+		Intruder:      intruderService,
+		ActiveScanner: activeScanner,
+		MaxBodyBytes:  cfg.BodyLimitBytes,
 	})
 	httpServer := &http.Server{
 		Addr: cfg.APIAddr, Handler: apiServer.Handler(),

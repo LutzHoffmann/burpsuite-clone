@@ -21,6 +21,14 @@ supports filtering, and links each group to the latest matching History entry.
 It computes results from retained response headers, including older captures;
 no separate scan requests or finding storage are created.
 
+The first active scanner check is an explicitly started, scope-bound GET query
+reflection probe. Select a History request, open Scanner, and confirm up to five
+unauthenticated requests. It never forwards captured cookies, authorization
+headers, original query values, or bodies. Results are observations in the
+current browser view, not persisted vulnerability reports. GET endpoints may
+still have side effects; test only targets you are authorized to assess.
+See [active scanner setup and limits](docs/setup/active-scanner.md).
+
 WebSocket forwarding supports `ws://` and `wss://`, with a read-only message
 inspector and an independent WebSocket Repeater with one-shot and manual session
 modes. Session mode keeps one connection open for multiple sends and unsolicited
