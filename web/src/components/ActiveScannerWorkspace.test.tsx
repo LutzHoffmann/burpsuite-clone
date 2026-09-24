@@ -19,9 +19,10 @@ function sample(overrides: Partial<Exchange> = {}): Exchange {
 it('requires confirmation and sends only bounded job parameters', async () => {
   const calls: unknown[] = [];
   vi.stubGlobal('confirm', vi.fn(() => false));
-  vi.stubGlobal('fetch', vi.fn(async (_path: RequestInfo | URL, init?: RequestInit) => {
+  vi.stubGlobal('fetch', vi.fn(async (path: RequestInfo | URL, init?: RequestInit) => {
+    if (String(path) === '/api/active-scan/runs') return new Response('[]', { status: 200 });
     calls.push(JSON.parse(String(init?.body)));
-    return new Response(JSON.stringify({ historyId: 7, probeCount: 1, probes: [{ parameter: 'q', status: 200, reflected: true, partial: false }] }), { status: 200 });
+    return new Response(JSON.stringify({ runId: 1, historyId: 7, state: 'completed', probeCount: 1, probes: [{ parameter: 'q', status: 200, reflected: true, partial: false }] }), { status: 200 });
   }));
   render(<ActiveScannerWorkspace exchange={sample()} />);
   await userEvent.click(screen.getByRole('button', { name: 'Start scan' }));
@@ -34,9 +35,40 @@ it('requires confirmation and sends only bounded job parameters', async () => {
   vi.unstubAllGlobals();
 });
 
-it('disables scans for out-of-scope and non-GET captures', () => {
+it('disables scans for out-of-scope and non-GET captures', async () => {
+  vi.stubGlobal('fetch', vi.fn(async () => new Response('[]', { status: 200 })));
   const { rerender } = render(<ActiveScannerWorkspace exchange={sample({ inScope: false })} />);
+  await screen.findByText('No saved runs yet.');
   expect(screen.getByRole('button', { name: 'Start scan' })).toBeDisabled();
   rerender(<ActiveScannerWorkspace exchange={sample({ method: 'POST' })} />);
   expect(screen.getByRole('button', { name: 'Start scan' })).toBeDisabled();
+  vi.unstubAllGlobals();
+});
+
+it('reopens saved scan results after mounting a fresh workspace', async () => {
+  vi.stubGlobal('fetch', vi.fn(async (path: RequestInfo | URL) => {
+    if (String(path) === '/api/active-scan/runs') return new Response(JSON.stringify([{ id: 4, historyId: 7, host: 'example.test', path: '/search', state: 'completed', probeCount: 1, reflectedCount: 1, startedAt: '' }]), { status: 200 });
+    if (String(path) === '/api/active-scan/runs/4') return new Response(JSON.stringify({ id: 4, historyId: 7, state: 'completed', probeCount: 1, probes: [{ parameter: 'q', status: 200, reflected: true, partial: false }] }), { status: 200 });
+    throw new Error(`Unexpected ${String(path)}`);
+  }));
+  render(<ActiveScannerWorkspace exchange={null} />);
+  await userEvent.click(await screen.findByRole('button', { name: /#4 · example.test/ }));
+  expect(await screen.findByText(/marker reflected/)).toBeInTheDocument();
+  vi.unstubAllGlobals();
+});
+
+it('deletes a saved run after confirmation', async () => {
+  const calls: string[] = [];
+  vi.stubGlobal('confirm', vi.fn(() => true));
+  vi.stubGlobal('fetch', vi.fn(async (path: RequestInfo | URL, init?: RequestInit) => {
+    calls.push(`${init?.method || 'GET'} ${String(path)}`);
+    if (String(path) === '/api/active-scan/runs') return new Response(JSON.stringify([{ id: 4, historyId: 7, host: 'example.test', path: '/search', state: 'completed', probeCount: 1, reflectedCount: 1, startedAt: '' }]), { status: 200 });
+    if (String(path) === '/api/active-scan/runs/4' && init?.method === 'DELETE') return new Response(null, { status: 204 });
+    throw new Error(`Unexpected ${String(path)}`);
+  }));
+  render(<ActiveScannerWorkspace exchange={null} />);
+  await userEvent.click(await screen.findByRole('button', { name: 'Delete scan #4' }));
+  expect(await screen.findByText('No saved runs yet.')).toBeInTheDocument();
+  expect(calls).toContain('DELETE /api/active-scan/runs/4');
+  vi.unstubAllGlobals();
 });

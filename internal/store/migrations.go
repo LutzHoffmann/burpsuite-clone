@@ -19,6 +19,33 @@ var migrations = []migration{
 	{version: 6, apply: applyCaptureQuotaSchema},
 	{version: 7, apply: applyWebSocketSchema},
 	{version: 8, apply: applyIntruderSchema},
+	{version: 9, apply: applyActiveScanSchema},
+}
+
+func applyActiveScanSchema(tx *sql.Tx) error {
+	_, err := tx.Exec(`
+CREATE TABLE active_scan_runs (
+ id INTEGER PRIMARY KEY AUTOINCREMENT,
+ project_id INTEGER NOT NULL REFERENCES projects(id),
+ exchange_id INTEGER NOT NULL REFERENCES exchanges(id) ON DELETE CASCADE,
+ state TEXT NOT NULL CHECK(state IN ('running','completed','scope_revoked','cancelled','failed','interrupted')),
+ stopped_reason TEXT NOT NULL DEFAULT '' CHECK(length(CAST(stopped_reason AS BLOB)) <= 64),
+ probe_count INTEGER NOT NULL DEFAULT 0 CHECK(probe_count BETWEEN 0 AND 5),
+ started_at_unix_nano INTEGER NOT NULL,
+ finished_at_unix_nano INTEGER
+);
+CREATE INDEX active_scan_runs_project_id ON active_scan_runs(project_id,id DESC);
+CREATE TABLE active_scan_probes (
+ run_id INTEGER NOT NULL REFERENCES active_scan_runs(id) ON DELETE CASCADE,
+ sequence INTEGER NOT NULL CHECK(sequence BETWEEN 0 AND 4),
+ parameter TEXT NOT NULL CHECK(length(CAST(parameter AS BLOB)) BETWEEN 1 AND 256),
+ status INTEGER NOT NULL CHECK(status BETWEEN 0 AND 999),
+ reflected INTEGER NOT NULL CHECK(reflected IN (0,1)),
+ partial INTEGER NOT NULL CHECK(partial IN (0,1)),
+ error TEXT NOT NULL CHECK(length(CAST(error AS BLOB)) <= 64),
+ PRIMARY KEY(run_id,sequence)
+);`)
+	return err
 }
 
 func applyIntruderSchema(tx *sql.Tx) error {

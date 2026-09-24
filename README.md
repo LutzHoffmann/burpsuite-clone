@@ -24,8 +24,9 @@ no separate scan requests or finding storage are created.
 The first active scanner check is an explicitly started, scope-bound GET query
 reflection probe. Select a History request, open Scanner, and confirm up to five
 unauthenticated requests. It never forwards captured cookies, authorization
-headers, original query values, or bodies. Results are observations in the
-current browser view, not persisted vulnerability reports. GET endpoints may
+headers, original query values, or bodies. Probe metadata is stored in the
+local project and can be reopened after restart; it is not a confirmed
+vulnerability report. GET endpoints may
 still have side effects; test only targets you are authorized to assess.
 See [active scanner setup and limits](docs/setup/active-scanner.md).
 

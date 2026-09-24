@@ -236,7 +236,7 @@ func TestWSMigrationAndRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	var version int
-	if err := s.db.QueryRow(`SELECT MAX(version) FROM schema_migrations`).Scan(&version); err != nil || version != 8 {
+	if err := s.db.QueryRow(`SELECT MAX(version) FROM schema_migrations`).Scan(&version); err != nil || version != 9 {
 		t.Fatal(version, err)
 	}
 	got, err := s.GetWSConnection(ctx, c.ID)

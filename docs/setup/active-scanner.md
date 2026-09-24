@@ -20,6 +20,13 @@ redirects are not followed, environment proxies are not used, and TLS
 verification remains enabled. If scope is revoked, the scan stops before the
 next request. Closing the Scanner view cancels its current request.
 
-Results are shown in the current browser view only. They are not retained as
-project findings or represented as confirmed vulnerabilities. This version does
-not crawl, test form bodies or authenticated flows, or run injection payloads.
+The last 100 run summaries are shown in Scanner and can be reopened after
+restart. Up to 10,000 runs are retained in the local project. Each finished
+probe is saved before the next request starts; a database error stops traffic.
+Finished runs can be deleted individually to free space; deleting a run does
+not delete its source History entry. Running scans cannot be deleted.
+Markers, original query values, credentials, headers, and response bodies are
+not stored in scan records. Runs interrupted by application restart are marked
+as interrupted. Results are not represented as confirmed vulnerabilities. This
+version does not crawl, test form bodies or authenticated flows, or run injection
+payloads.

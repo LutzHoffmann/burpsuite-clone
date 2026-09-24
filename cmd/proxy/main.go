@@ -59,6 +59,9 @@ func main() {
 		log.Fatalf("recover Intruder jobs: %v", err)
 	}
 	defer intruderService.Close()
+	if err := history.RecoverActiveScanRuns(context.Background()); err != nil {
+		log.Fatalf("recover active scanner runs: %v", err)
+	}
 	activeScanner, err := activescan.New(history, intruderScope{scopeManager}, repeater.NewHTTPSender(nil))
 	if err != nil {
 		log.Fatalf("initialize active scanner: %v", err)
