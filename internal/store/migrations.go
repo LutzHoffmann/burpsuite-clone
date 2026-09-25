@@ -20,6 +20,50 @@ var migrations = []migration{
 	{version: 7, apply: applyWebSocketSchema},
 	{version: 8, apply: applyIntruderSchema},
 	{version: 9, apply: applyActiveScanSchema},
+	{version: 10, apply: applyCrawlSchema},
+}
+
+func applyCrawlSchema(tx *sql.Tx) error {
+	_, err := tx.Exec(`
+CREATE TABLE crawl_runs (
+ id INTEGER PRIMARY KEY AUTOINCREMENT,
+ project_id INTEGER NOT NULL REFERENCES projects(id),
+ exchange_id INTEGER NOT NULL REFERENCES exchanges(id) ON DELETE CASCADE,
+ max_pages INTEGER NOT NULL CHECK(max_pages BETWEEN 1 AND 25),
+ max_depth INTEGER NOT NULL CHECK(max_depth BETWEEN 0 AND 3),
+ state TEXT NOT NULL CHECK(state IN ('running','completed','cancelled','scope_revoked','failed','interrupted')),
+ reason TEXT NOT NULL DEFAULT '' CHECK(length(CAST(reason AS BLOB)) <= 64),
+ page_count INTEGER NOT NULL DEFAULT 0 CHECK(page_count BETWEEN 0 AND max_pages),
+ field_count INTEGER NOT NULL DEFAULT 0 CHECK(field_count BETWEEN 0 AND 100),
+ started_at_unix_nano INTEGER NOT NULL,
+ finished_at_unix_nano INTEGER
+);
+CREATE INDEX crawl_runs_project_id ON crawl_runs(project_id,id DESC);
+CREATE TABLE crawl_pages (
+ run_id INTEGER NOT NULL REFERENCES crawl_runs(id) ON DELETE CASCADE,
+ url TEXT NOT NULL CHECK(length(CAST(url AS BLOB)) BETWEEN 1 AND 4096),
+ depth INTEGER NOT NULL CHECK(depth BETWEEN 0 AND 3),
+ status INTEGER NOT NULL CHECK(status BETWEEN 0 AND 999),
+ content_type TEXT NOT NULL CHECK(length(CAST(content_type AS BLOB)) <= 128),
+ truncated INTEGER NOT NULL CHECK(truncated IN (0,1)),
+ error TEXT NOT NULL CHECK(length(CAST(error AS BLOB)) <= 64),
+ PRIMARY KEY(run_id,url)
+);
+CREATE TABLE crawl_forms (
+ id INTEGER PRIMARY KEY AUTOINCREMENT,
+ run_id INTEGER NOT NULL REFERENCES crawl_runs(id) ON DELETE CASCADE,
+ page_url TEXT NOT NULL CHECK(length(CAST(page_url AS BLOB)) BETWEEN 1 AND 4096),
+ action_url TEXT NOT NULL CHECK(length(CAST(action_url AS BLOB)) BETWEEN 1 AND 4096),
+ method TEXT NOT NULL CHECK(length(CAST(method AS BLOB)) BETWEEN 1 AND 16)
+);
+CREATE TABLE crawl_fields (
+ form_id INTEGER NOT NULL REFERENCES crawl_forms(id) ON DELETE CASCADE,
+ sequence INTEGER NOT NULL,
+ name TEXT NOT NULL CHECK(length(CAST(name AS BLOB)) BETWEEN 1 AND 256),
+ type TEXT NOT NULL CHECK(length(CAST(type AS BLOB)) BETWEEN 1 AND 64),
+ PRIMARY KEY(form_id,sequence)
+);`)
+	return err
 }
 
 func applyActiveScanSchema(tx *sql.Tx) error {
