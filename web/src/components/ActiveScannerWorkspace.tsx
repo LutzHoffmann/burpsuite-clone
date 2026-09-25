@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import type { Exchange } from '../types';
+import { CrawlWorkspace } from './CrawlWorkspace';
 
 interface Probe { parameter: string; status: number; reflected: boolean; partial: boolean; error?: string }
 interface Report { id?: number; runId?: number; historyId: number; state?: string; probeCount: number; stoppedReason?: string; probes: Probe[] }
@@ -82,7 +83,7 @@ export function ActiveScannerWorkspace({ exchange }: { exchange: Exchange | null
   };
 
   return <section className="active-scanner-workspace" aria-label="Active scanner">
-    <header><span className="eyebrow">Explicit traffic only</span><h1>Active scanner</h1><p>Limited query-reflection probes. A reflected marker is an observation, not proof of XSS or another vulnerability.</p></header>
+    <header><span className="eyebrow">Explicit traffic only</span><h1>Active scanner</h1><p>Separate site discovery and limited query-reflection probes. Neither is proof of a vulnerability.</p></header>
     {!exchange && <p className="scanner-notice">Select a request in History before opening this tool.</p>}
     {exchange && <div className="scanner-target"><strong>{exchange.method} {exchange.scheme}://{exchange.host}{exchange.path}</strong><span>History #{exchange.id} · {exchange.inScope ? 'captured in scope' : 'captured outside scope'}</span></div>}
     {exchange && !eligible && <p className="scanner-notice">Only in-scope, successful GET requests with query parameters can be scanned.</p>}
@@ -91,5 +92,6 @@ export function ActiveScannerWorkspace({ exchange }: { exchange: Exchange | null
     {error && <p className="api-error" role="alert">{error}</p>}
     {report && <div className="scanner-report"><h2>Scan #{report.runId ?? report.id} · {report.probeCount} {report.probeCount === 1 ? 'probe' : 'probes'} · {report.state ?? 'completed'}</h2>{report.stoppedReason && <p role="status">Stopped: {report.stoppedReason}</p>}{report.probes.map((probe) => <article key={probe.parameter}><strong>{probe.parameter}</strong><span>{probe.error ? 'Request failed' : `HTTP ${probe.status} · ${probe.reflected ? 'marker reflected' : 'no reflection observed'}${probe.partial ? ' · partial response capture' : ''}`}</span></article>)}</div>}
     <section className="scanner-history" aria-label="Saved scan history"><h2>Saved runs</h2><p>Recent project runs; only probe metadata is stored.</p>{historyError && <p className="api-error" role="alert">{historyError}</p>}{runs.length === 0 && <p className="scanner-notice">No saved runs yet.</p>}{runs.map((run) => <div key={run.id} className="scanner-history-row"><button type="button" className="quiet-button" onClick={() => void openRun(run.id)}>Open #{run.id} · {run.host}{run.path}</button><span>{run.state} · {run.probeCount} probes · {run.reflectedCount} reflected</span><button type="button" className="quiet-button" disabled={run.state === 'running'} onClick={() => void deleteRun(run.id)}>Delete scan #{run.id}</button></div>)}</section>
+    <CrawlWorkspace exchange={exchange} />
   </section>;
 }

@@ -30,9 +30,9 @@ revocation stops the crawl. The user can cancel a running crawl.
 
 A run stores its seed History ID, limits, state, timestamps, counts, and
 bounded records for visited pages and discovered form fields. Each page record
-includes normalized URL, status, content type, depth, truncation, and a safe
+includes normalized URL with query values removed, status, content type, depth, truncation, and a safe
 error code. Each form record includes page URL, action URL, method, and field
-names/types; no field values, response bodies, credentials, or captured
+names/types; no query values, field values, response bodies, credentials, or captured
 headers are retained. Results can be reopened after restart and deleted
 without deleting source History. Interrupted runs are marked on startup.
 

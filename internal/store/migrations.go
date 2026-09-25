@@ -41,13 +41,14 @@ CREATE TABLE crawl_runs (
 CREATE INDEX crawl_runs_project_id ON crawl_runs(project_id,id DESC);
 CREATE TABLE crawl_pages (
  run_id INTEGER NOT NULL REFERENCES crawl_runs(id) ON DELETE CASCADE,
+ url_hash TEXT NOT NULL CHECK(length(url_hash) = 64),
  url TEXT NOT NULL CHECK(length(CAST(url AS BLOB)) BETWEEN 1 AND 4096),
  depth INTEGER NOT NULL CHECK(depth BETWEEN 0 AND 3),
  status INTEGER NOT NULL CHECK(status BETWEEN 0 AND 999),
  content_type TEXT NOT NULL CHECK(length(CAST(content_type AS BLOB)) <= 128),
  truncated INTEGER NOT NULL CHECK(truncated IN (0,1)),
  error TEXT NOT NULL CHECK(length(CAST(error AS BLOB)) <= 64),
- PRIMARY KEY(run_id,url)
+ PRIMARY KEY(run_id,url_hash)
 );
 CREATE TABLE crawl_forms (
  id INTEGER PRIMARY KEY AUTOINCREMENT,

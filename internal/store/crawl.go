@@ -2,9 +2,11 @@ package store
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"errors"
 	"fmt"
+	"net/url"
 	"time"
 )
 
@@ -51,6 +53,17 @@ type CrawlStore interface {
 	ListCrawlRuns(context.Context) ([]CrawlRun, error)
 	GetCrawlRun(context.Context, int64) (CrawlRun, error)
 	DeleteCrawlRun(context.Context, int64) error
+}
+
+func withoutQuery(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return ""
+	}
+	u.RawQuery = ""
+	u.ForceQuery = false
+	u.Fragment = ""
+	return u.String()
 }
 
 func (s *SQLiteStore) CreateCrawlRun(ctx context.Context, historyID int64, maxPages, maxDepth int) (int64, error) {
@@ -119,12 +132,13 @@ func (s *SQLiteStore) AppendCrawlPage(ctx context.Context, runID int64, page Cra
 	if n != 1 {
 		return fmt.Errorf("crawl page limit or state conflict")
 	}
-	_, err = tx.ExecContext(ctx, `INSERT INTO crawl_pages(run_id,url,depth,status,content_type,truncated,error) VALUES(?,?,?,?,?,?,?)`, runID, page.URL, page.Depth, page.Status, page.ContentType, page.Truncated, page.Error)
+	urlHash := fmt.Sprintf("%x", sha256.Sum256([]byte(page.URL)))
+	_, err = tx.ExecContext(ctx, `INSERT INTO crawl_pages(run_id,url_hash,url,depth,status,content_type,truncated,error) VALUES(?,?,?,?,?,?,?,?)`, runID, urlHash, withoutQuery(page.URL), page.Depth, page.Status, page.ContentType, page.Truncated, page.Error)
 	if err != nil {
 		return err
 	}
 	for _, form := range forms {
-		res, err := tx.ExecContext(ctx, `INSERT INTO crawl_forms(run_id,page_url,action_url,method) VALUES(?,?,?,?)`, runID, form.PageURL, form.ActionURL, form.Method)
+		res, err := tx.ExecContext(ctx, `INSERT INTO crawl_forms(run_id,page_url,action_url,method) VALUES(?,?,?,?)`, runID, withoutQuery(form.PageURL), withoutQuery(form.ActionURL), form.Method)
 		if err != nil {
 			return err
 		}

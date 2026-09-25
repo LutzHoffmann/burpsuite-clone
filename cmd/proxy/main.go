@@ -19,6 +19,7 @@ import (
 	"github.com/lutzifer/burpsuite-clone/internal/api"
 	"github.com/lutzifer/burpsuite-clone/internal/certs"
 	"github.com/lutzifer/burpsuite-clone/internal/config"
+	"github.com/lutzifer/burpsuite-clone/internal/crawl"
 	"github.com/lutzifer/burpsuite-clone/internal/events"
 	"github.com/lutzifer/burpsuite-clone/internal/intercept"
 	"github.com/lutzifer/burpsuite-clone/internal/intruder"
@@ -65,6 +66,13 @@ func main() {
 	activeScanner, err := activescan.New(history, intruderScope{scopeManager}, repeater.NewHTTPSender(nil))
 	if err != nil {
 		log.Fatalf("initialize active scanner: %v", err)
+	}
+	if err := history.RecoverCrawlRuns(context.Background()); err != nil {
+		log.Fatalf("recover crawler runs: %v", err)
+	}
+	crawler, err := crawl.New(history, history, intruderScope{scopeManager}, repeater.NewHTTPSender(nil))
+	if err != nil {
+		log.Fatalf("initialize crawler: %v", err)
 	}
 	targetService := target.NewService(history, scopeManager, hub, target.Limits{
 		MaxJSONDepth: 16, MaxFields: 1000, MaxMultipartFields: 100,
@@ -122,6 +130,7 @@ func main() {
 		Target:        targetService,
 		Intruder:      intruderService,
 		ActiveScanner: activeScanner,
+		Crawler:       crawler,
 		MaxBodyBytes:  cfg.BodyLimitBytes,
 	})
 	httpServer := &http.Server{

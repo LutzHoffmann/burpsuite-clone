@@ -19,15 +19,18 @@ func TestCrawlRunLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := s.AppendCrawlPage(ctx, id, CrawlPage{URL: "https://example.test/", Status: 200}, []CrawlForm{{PageURL: "https://example.test/", ActionURL: "https://example.test/post", Method: "POST", Fields: []CrawlField{{Name: "q", Type: "text"}}}}); err != nil {
+	if err := s.AppendCrawlPage(ctx, id, CrawlPage{URL: "https://example.test/?token=secret", Status: 200}, []CrawlForm{{PageURL: "https://example.test/?token=secret", ActionURL: "https://example.test/post?key=secret", Method: "POST", Fields: []CrawlField{{Name: "q", Type: "text"}}}}); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.AppendCrawlPage(ctx, id, CrawlPage{URL: "https://example.test/"}, nil); err == nil {
+	if err := s.AppendCrawlPage(ctx, id, CrawlPage{URL: "https://example.test/?token=secret"}, nil); err == nil {
 		t.Fatal("duplicate page accepted")
 	}
 	run, err := s.GetCrawlRun(ctx, id)
 	if err != nil || run.State != "running" || run.PageCount != 1 || len(run.Pages) != 1 || len(run.Forms) != 1 || len(run.Forms[0].Fields) != 1 {
 		t.Fatalf("run=%+v err=%v", run, err)
+	}
+	if run.Pages[0].URL != "https://example.test/" || run.Forms[0].ActionURL != "https://example.test/post" {
+		t.Fatalf("stored query values: %+v", run)
 	}
 	if err := s.DeleteCrawlRun(ctx, id); !errors.Is(err, sql.ErrNoRows) {
 		t.Fatalf("deleted running job: %v", err)
