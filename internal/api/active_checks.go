@@ -38,7 +38,7 @@ func (s *Server) handleActiveChecksStart(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	var input activechecks.Request
-	if err := decodeJSONLimit(w, r, &input, 1024); err != nil {
+	if err := decodeJSONLimit(w, r, &input, 20<<10); err != nil {
 		return
 	}
 	report, err := s.cfg.ActiveChecks.Start(r.Context(), input)

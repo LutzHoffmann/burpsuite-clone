@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/lutzifer/burpsuite-clone/internal/repeater"
+	"github.com/lutzifer/burpsuite-clone/internal/scancreds"
 	"github.com/lutzifer/burpsuite-clone/internal/store"
 )
 
@@ -35,8 +36,8 @@ func TestServiceChecksDiscoveredGETInputs(t *testing.T) {
 		mu.Lock()
 		requests = append(requests, r.Method+" "+r.URL.Path)
 		mu.Unlock()
-		if r.Header.Get("Cookie") != "" || r.Header.Get("Authorization") != "" {
-			t.Errorf("forwarded credentials")
+		if r.Header.Get("Cookie") != "sid=explicit" || r.Header.Get("Authorization") != "Bearer explicit" {
+			t.Errorf("incorrect explicit session headers")
 		}
 		w.Header().Set("Content-Type", "text/html")
 		w.Write([]byte("<p>" + r.URL.Query().Get("q") + r.URL.Query().Get("term") + "</p>"))
@@ -65,7 +66,7 @@ func TestServiceChecksDiscoveredGETInputs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	report, err := service.Start(context.Background(), Request{CrawlID: crawlID, Acknowledge: true})
+	report, err := service.Start(context.Background(), Request{CrawlID: crawlID, Acknowledge: true, Session: scancreds.Credentials{Cookie: "sid=explicit", Authorization: "Bearer explicit"}})
 	if err != nil {
 		t.Fatal(err)
 	}

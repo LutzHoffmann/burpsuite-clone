@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/lutzifer/burpsuite-clone/internal/repeater"
+	"github.com/lutzifer/burpsuite-clone/internal/scancreds"
 	"github.com/lutzifer/burpsuite-clone/internal/store"
 )
 
@@ -22,6 +23,9 @@ func TestCrawlerDiscoversWithoutSubmitting(t *testing.T) {
 	var methods []string
 	var mu sync.Mutex
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Cookie"); got != "sid=explicit" {
+			t.Errorf("session cookie=%q", got)
+		}
 		mu.Lock()
 		methods = append(methods, r.Method+" "+r.URL.Path)
 		mu.Unlock()
@@ -46,7 +50,7 @@ func TestCrawlerDiscoversWithoutSubmitting(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	report, err := c.Start(context.Background(), Request{HistoryID: seed.ID, MaxPages: 2, MaxDepth: 1, Acknowledge: true})
+	report, err := c.Start(context.Background(), Request{HistoryID: seed.ID, MaxPages: 2, MaxDepth: 1, Acknowledge: true, Session: scancreds.Credentials{Cookie: "sid=explicit"}})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -33,6 +33,10 @@ func TestCrawlAPI(t *testing.T) {
 	if rec := storageRequest(s, "POST", "/api/crawl/runs", `{"historyId":3,"maxPages":5,"maxDepth":1,"acknowledge":true}`); rec.Code != http.StatusAccepted || fake.input.MaxPages != 5 {
 		t.Fatalf("start=%d %s", rec.Code, rec.Body.String())
 	}
+	cookie := strings.Repeat("a", 2048)
+	if rec := storageRequest(s, "POST", "/api/crawl/runs", `{"historyId":3,"maxPages":5,"maxDepth":1,"acknowledge":true,"session":{"cookie":"`+cookie+`"}}`); rec.Code != http.StatusAccepted || fake.input.Session.Cookie != cookie {
+		t.Fatalf("session start=%d", rec.Code)
+	}
 	if rec := storageRequest(s, "POST", "/api/crawl/runs", `{"unexpected":true}`); rec.Code != http.StatusBadRequest {
 		t.Fatalf("invalid=%d", rec.Code)
 	}

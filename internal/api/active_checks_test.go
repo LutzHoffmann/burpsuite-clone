@@ -33,6 +33,10 @@ func TestActiveChecksAPI(t *testing.T) {
 	if rec := storageRequest(s, "POST", "/api/active-checks/runs", `{"crawlId":3,"acknowledge":true}`); rec.Code != http.StatusAccepted || fake.input.CrawlID != 3 {
 		t.Fatalf("start=%d %s", rec.Code, rec.Body.String())
 	}
+	cookie := strings.Repeat("a", 2048)
+	if rec := storageRequest(s, "POST", "/api/active-checks/runs", `{"crawlId":3,"acknowledge":true,"session":{"cookie":"`+cookie+`"}}`); rec.Code != http.StatusAccepted || fake.input.Session.Cookie != cookie {
+		t.Fatalf("session start=%d", rec.Code)
+	}
 	if rec := storageRequest(s, "POST", "/api/active-checks/runs", `{"unknown":true}`); rec.Code != http.StatusBadRequest {
 		t.Fatalf("invalid=%d", rec.Code)
 	}

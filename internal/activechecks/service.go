@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/lutzifer/burpsuite-clone/internal/repeater"
+	"github.com/lutzifer/burpsuite-clone/internal/scancreds"
 	"github.com/lutzifer/burpsuite-clone/internal/store"
 )
 
@@ -29,8 +30,9 @@ type CrawlReader interface {
 }
 type Scope interface{ Allows(string) bool }
 type Request struct {
-	CrawlID     int64 `json:"crawlId"`
-	Acknowledge bool  `json:"acknowledge"`
+	CrawlID     int64                 `json:"crawlId"`
+	Acknowledge bool                  `json:"acknowledge"`
+	Session     scancreds.Credentials `json:"session"`
 }
 type Report struct {
 	RunID           int64  `json:"runId"`
@@ -108,7 +110,7 @@ func chooseCandidates(run store.CrawlRun, seed *url.URL, scope Scope) []candidat
 	return chosen
 }
 func (s *Service) Start(ctx context.Context, input Request) (Report, error) {
-	if input.CrawlID < 1 || !input.Acknowledge {
+	if input.CrawlID < 1 || !input.Acknowledge || input.Session.Validate() != nil {
 		return Report{}, ErrInvalidInput
 	}
 	s.mu.Lock()
@@ -152,7 +154,7 @@ func (s *Service) Start(ctx context.Context, input Request) (Report, error) {
 	if maximum > 100 {
 		maximum = 100
 	}
-	go s.run(runCtx, id, candidates)
+	go s.run(runCtx, id, candidates, input.Session)
 	return Report{RunID: id, State: "running", MaximumRequests: maximum}, nil
 }
 func (s *Service) Cancel(id int64) error {
@@ -164,7 +166,7 @@ func (s *Service) Cancel(id int64) error {
 	s.cancel()
 	return nil
 }
-func (s *Service) run(ctx context.Context, id int64, candidates []candidate) {
+func (s *Service) run(ctx context.Context, id int64, candidates []candidate, session scancreds.Credentials) {
 	state, reason := "completed", ""
 	defer func() {
 		persistCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -224,7 +226,7 @@ func (s *Service) run(ctx context.Context, id int64, candidates []candidate) {
 				return
 			}
 			lastSend = time.Now()
-			result, sendErr := s.sender.Send(ctx, repeater.SendRequest{Method: "GET", URL: target.String(), Headers: map[string][]string{"User-Agent": {"BurpSuiteClone-ActiveChecks/1"}}}, repeater.SendOptions{Timeout: 5 * time.Second, BodyLimitBytes: 64 << 10})
+			result, sendErr := s.sender.Send(ctx, repeater.SendRequest{Method: "GET", URL: target.String(), Headers: session.Headers("BurpSuiteClone-ActiveChecks/1")}, repeater.SendOptions{Timeout: 5 * time.Second, BodyLimitBytes: 64 << 10})
 			observation := store.ActiveCheckObservation{URL: item.url, Source: item.source, Parameter: name, Context: "unknown"}
 			if sendErr != nil {
 				if ctx.Err() != nil {

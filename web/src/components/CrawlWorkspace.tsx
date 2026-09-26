@@ -14,6 +14,8 @@ export function CrawlWorkspace({ exchange }: { exchange: Seed | null }) {
   const [selected, setSelected] = useState<Run | null>(null);
   const [error, setError] = useState('');
   const [starting, setStarting] = useState(false);
+  const [cookie, setCookie] = useState('');
+  const [authorization, setAuthorization] = useState('');
   const eligible = !!exchange && exchange.method === 'GET' && exchange.inScope && !exchange.error;
 
   const loadRuns = async (signal?: AbortSignal) => {
@@ -43,11 +45,12 @@ export function CrawlWorkspace({ exchange }: { exchange: Seed | null }) {
   }, [selected]);
   const start = async () => {
     if (!eligible || !exchange || starting) return;
-    if (!window.confirm(`Crawl up to ${maxPages} pages on ${exchange.scheme}://${exchange.host}? GET requests can have side effects. Only test systems you are authorized to assess.`)) return;
+    if (!window.confirm(`Crawl up to ${maxPages} pages on ${exchange.scheme}://${exchange.host}? ${cookie || authorization ? 'The session headers you entered will be sent to this origin. ' : ''}GET requests can have side effects. Only test systems you are authorized to assess.`)) return;
     setStarting(true); setError('');
     try {
-      const response = await fetch('/api/crawl/runs', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ historyId: exchange.id, maxPages, maxDepth, acknowledge: true }), cache: 'no-store' });
+      const response = await fetch('/api/crawl/runs', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ historyId: exchange.id, maxPages, maxDepth, acknowledge: true, session: { cookie, authorization } }), cache: 'no-store' });
       if (!response.ok) throw new Error(`Crawl rejected (${response.status}): ${(await response.text()).trim()}`);
+      setCookie(''); setAuthorization('');
       const report = await response.json() as { runId: number };
       await openRun(report.runId);
       await loadRuns();
@@ -74,6 +77,8 @@ export function CrawlWorkspace({ exchange }: { exchange: Seed | null }) {
   return <section className="scanner-history" aria-label="Crawler">
     <h2>Site crawler</h2><p>Discovers pages and form fields only. It does not submit forms or verify vulnerabilities.</p>
     <div className="scanner-controls"><label>Maximum pages<select value={maxPages} onChange={(event) => setMaxPages(Number(event.target.value))}>{[1, 5, 10, 25].map((value) => <option key={value}>{value}</option>)}</select></label><label>Maximum depth<select value={maxDepth} onChange={(event) => setMaxDepth(Number(event.target.value))}>{[0, 1, 2, 3].map((value) => <option key={value}>{value}</option>)}</select></label><button type="button" className="quiet-button" disabled={!eligible || starting} onClick={() => void start()}>{starting ? 'Starting...' : 'Start crawl'}</button>{selected?.state === 'running' && <button type="button" className="quiet-button" onClick={() => void cancel()}>Cancel crawl</button>}</div>
+    <div className="scanner-controls"><label>Session cookie<input type="password" autoComplete="off" value={cookie} onChange={(event) => setCookie(event.target.value)} maxLength={4096} /></label><label>Authorization header<input type="password" autoComplete="off" value={authorization} onChange={(event) => setAuthorization(event.target.value)} maxLength={4096} /></label></div>
+    <p className="scanner-notice">Optional explicit session headers are kept only for this run, sent to the selected origin, and not saved in crawl results.</p>
     {error && <p className="api-error" role="alert">{error}</p>}
     {selected && <div className="scanner-report"><h2>Crawl #{selected.id} · {selected.state} · {selected.pageCount} pages</h2>{selected.reason && <p>{selected.reason}</p>}{selected.pages?.map((page) => <article key={page.url}><strong>{page.url}</strong><span>{page.error || `HTTP ${page.status} · depth ${page.depth}${page.truncated ? ' · partial' : ''}`}</span></article>)}{selected.forms?.map((form, index) => <article key={`${form.pageUrl}-${index}`}><strong>{form.method} form → {form.actionUrl}</strong><span>{form.fields.map((field) => `${field.name} (${field.type})`).join(', ') || 'No named fields'}</span></article>)}</div>}
     <h3>Saved crawls</h3>{runs.map((run) => <div className="scanner-history-row" key={run.id}><button type="button" className="quiet-button" onClick={() => void openRun(run.id).catch((cause) => setError(String(cause)))}>Open crawl #{run.id}</button><span>{run.state} · {run.pageCount} pages</span><button type="button" className="quiet-button" disabled={run.state === 'running'} onClick={() => void remove(run.id)}>Delete crawl #{run.id}</button></div>)}

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/lutzifer/burpsuite-clone/internal/repeater"
+	"github.com/lutzifer/burpsuite-clone/internal/scancreds"
 	"github.com/lutzifer/burpsuite-clone/internal/store"
 )
 
@@ -24,10 +25,11 @@ type History interface {
 }
 type Scope interface{ Allows(string) bool }
 type Request struct {
-	HistoryID   int64 `json:"historyId"`
-	MaxPages    int   `json:"maxPages"`
-	MaxDepth    int   `json:"maxDepth"`
-	Acknowledge bool  `json:"acknowledge"`
+	HistoryID   int64                 `json:"historyId"`
+	MaxPages    int                   `json:"maxPages"`
+	MaxDepth    int                   `json:"maxDepth"`
+	Acknowledge bool                  `json:"acknowledge"`
+	Session     scancreds.Credentials `json:"session"`
 }
 type Report struct {
 	RunID int64  `json:"runId"`
@@ -51,7 +53,7 @@ func New(history History, repository store.CrawlStore, scope Scope, sender repea
 }
 
 func (c *Crawler) Start(ctx context.Context, input Request) (Report, error) {
-	if input.HistoryID < 1 || input.MaxPages < 1 || input.MaxPages > 25 || input.MaxDepth < 0 || input.MaxDepth > 3 || !input.Acknowledge {
+	if input.HistoryID < 1 || input.MaxPages < 1 || input.MaxPages > 25 || input.MaxDepth < 0 || input.MaxDepth > 3 || !input.Acknowledge || input.Session.Validate() != nil {
 		return Report{}, ErrInvalidInput
 	}
 	c.mu.Lock()
@@ -142,7 +144,7 @@ func (c *Crawler) run(ctx context.Context, id int64, seed string, input Request)
 			return
 		}
 		lastSend = time.Now()
-		result, sendErr := c.sender.Send(ctx, repeater.SendRequest{Method: "GET", URL: item.url, Headers: map[string][]string{"User-Agent": {"BurpSuiteClone-Crawler/1"}}}, repeater.SendOptions{Timeout: 5 * time.Second, BodyLimitBytes: 64 << 10})
+		result, sendErr := c.sender.Send(ctx, repeater.SendRequest{Method: "GET", URL: item.url, Headers: input.Session.Headers("BurpSuiteClone-Crawler/1")}, repeater.SendOptions{Timeout: 5 * time.Second, BodyLimitBytes: 64 << 10})
 		page := store.CrawlPage{URL: item.url, Depth: item.depth}
 		var links []string
 		var forms []Form

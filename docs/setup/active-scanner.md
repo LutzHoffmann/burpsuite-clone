@@ -45,7 +45,16 @@ overall deadline, and a 64 KiB response-body cap. You can cancel a running
 job. Pages and form field names/types are saved without response bodies,
 query values, or form values; finished runs can be reopened or deleted. The last 100 runs are
 listed, with a 10,000-run project cap. Restarted jobs are marked interrupted.
-The crawler does not execute JavaScript or handle authenticated sessions.
+The crawler does not execute JavaScript or perform automatic login.
+
+For an authenticated GET-only run, enter a session Cookie and/or Authorization
+header explicitly before starting the crawler. These values are sent only to
+same-origin, currently in-scope targets, are held in memory for that run, and
+are not copied from History or written to crawl records. Re-enter them for
+active checks; a crawl session is not reused automatically. Do not supply
+credentials for a plain-HTTP target unless you accept their exposure on the
+network. This is static-header replay, not automatic login, token refresh, or
+session-expiry detection.
 
 ## Active checks from a crawl
 
@@ -64,5 +73,5 @@ body and, if recognizable, its HTML context. It is an observation, **not** a
 confirmed XSS or injection vulnerability. Truncated and ambiguous responses
 are marked conservatively. No response body, marker value, original query
 value, or form value is stored. Runs can be cancelled, reopened, and deleted;
-restart marks unfinished runs interrupted. Authenticated sessions, POST forms,
+restart marks unfinished runs interrupted. Automatic login, POST forms,
 JavaScript-driven inputs, and exploit confirmation are not covered.

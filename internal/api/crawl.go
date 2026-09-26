@@ -39,7 +39,7 @@ func (s *Server) handleCrawlStart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var input crawl.Request
-	if err := decodeJSONLimit(w, r, &input, 1024); err != nil {
+	if err := decodeJSONLimit(w, r, &input, 20<<10); err != nil {
 		return
 	}
 	report, err := s.cfg.Crawler.Start(r.Context(), input)
