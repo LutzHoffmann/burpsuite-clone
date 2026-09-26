@@ -21,6 +21,20 @@ var migrations = []migration{
 	{version: 8, apply: applyIntruderSchema},
 	{version: 9, apply: applyActiveScanSchema},
 	{version: 10, apply: applyCrawlSchema},
+	{version: 11, apply: applyCrawlQueryNamesSchema},
+}
+
+func applyCrawlQueryNamesSchema(tx *sql.Tx) error {
+	_, err := tx.Exec(`CREATE TABLE crawl_page_query_names (
+ run_id INTEGER NOT NULL,
+ url_hash TEXT NOT NULL,
+ sequence INTEGER NOT NULL CHECK(sequence BETWEEN 0 AND 19),
+ name TEXT NOT NULL CHECK(length(CAST(name AS BLOB)) BETWEEN 1 AND 256),
+ PRIMARY KEY(run_id,url_hash,sequence),
+ UNIQUE(run_id,url_hash,name),
+ FOREIGN KEY(run_id,url_hash) REFERENCES crawl_pages(run_id,url_hash) ON DELETE CASCADE
+);`)
+	return err
 }
 
 func applyCrawlSchema(tx *sql.Tx) error {

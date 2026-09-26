@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 )
@@ -50,5 +51,39 @@ func TestCrawlRunLifecycle(t *testing.T) {
 	}
 	if _, err := s.GetExchange(ctx, exchange.ID); err != nil {
 		t.Fatalf("history deleted: %v", err)
+	}
+}
+
+func TestCrawlQueryNamesWithoutValues(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	exchange := &Exchange{Method: "GET", Scheme: "https", Host: "example.test", Path: "/", Status: 200, InScope: true, StartedAt: time.Now()}
+	if err := s.SaveExchange(ctx, exchange); err != nil {
+		t.Fatal(err)
+	}
+	id, err := s.CreateCrawlRun(ctx, exchange.ID, 2, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, raw := range []string{"https://example.test/?b=first-secret&a=1", "https://example.test/?b=second-secret&a=2"} {
+		if err := s.AppendCrawlPage(ctx, id, CrawlPage{URL: raw, Status: 200}, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	run, err := s.GetCrawlRun(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(run.Pages) != 2 {
+		t.Fatalf("pages=%+v", run.Pages)
+	}
+	for _, page := range run.Pages {
+		if len(page.QueryNames) != 2 || page.QueryNames[0] != "a" || page.QueryNames[1] != "b" || strings.Contains(page.URL, "secret") {
+			t.Fatalf("page=%+v", page)
+		}
+	}
+	var leaked int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM crawl_pages WHERE url LIKE '%secret%'`).Scan(&leaked); err != nil || leaked != 0 {
+		t.Fatalf("leaked=%d err=%v", leaked, err)
 	}
 }

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"sort"
 	"time"
 )
 
@@ -23,12 +24,13 @@ type CrawlForm struct {
 	Fields    []CrawlField `json:"fields"`
 }
 type CrawlPage struct {
-	URL         string `json:"url"`
-	Depth       int    `json:"depth"`
-	Status      int    `json:"status"`
-	ContentType string `json:"contentType"`
-	Truncated   bool   `json:"truncated"`
-	Error       string `json:"error,omitempty"`
+	URL         string   `json:"url"`
+	QueryNames  []string `json:"queryNames,omitempty"`
+	Depth       int      `json:"depth"`
+	Status      int      `json:"status"`
+	ContentType string   `json:"contentType"`
+	Truncated   bool     `json:"truncated"`
+	Error       string   `json:"error,omitempty"`
 }
 type CrawlRun struct {
 	ID         int64       `json:"id"`
@@ -137,6 +139,29 @@ func (s *SQLiteStore) AppendCrawlPage(ctx context.Context, runID int64, page Cra
 	if err != nil {
 		return err
 	}
+	parsed, err := url.Parse(page.URL)
+	if err != nil {
+		return err
+	}
+	query, err := url.ParseQuery(parsed.RawQuery)
+	if err != nil {
+		return err
+	}
+	names := make([]string, 0, len(query))
+	for name := range query {
+		if len(name) >= 1 && len(name) <= 256 {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	if len(names) > 20 {
+		names = names[:20]
+	}
+	for i, name := range names {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO crawl_page_query_names(run_id,url_hash,sequence,name) VALUES(?,?,?,?)`, runID, urlHash, i, name); err != nil {
+			return err
+		}
+	}
 	for _, form := range forms {
 		res, err := tx.ExecContext(ctx, `INSERT INTO crawl_forms(run_id,page_url,action_url,method) VALUES(?,?,?,?)`, runID, withoutQuery(form.PageURL), withoutQuery(form.ActionURL), form.Method)
 		if err != nil {
@@ -219,21 +244,43 @@ func (s *SQLiteStore) GetCrawlRun(ctx context.Context, id int64) (CrawlRun, erro
 	if err != nil {
 		return run, err
 	}
-	pages, err := s.db.QueryContext(ctx, `SELECT url,depth,status,content_type,truncated,error FROM crawl_pages WHERE run_id=? ORDER BY rowid`, id)
+	pages, err := s.db.QueryContext(ctx, `SELECT url_hash,url,depth,status,content_type,truncated,error FROM crawl_pages WHERE run_id=? ORDER BY rowid`, id)
 	if err != nil {
 		return run, err
 	}
 	run.Pages = []CrawlPage{}
+	pageIndex := map[string]int{}
 	for pages.Next() {
 		var p CrawlPage
-		if err := pages.Scan(&p.URL, &p.Depth, &p.Status, &p.ContentType, &p.Truncated, &p.Error); err != nil {
+		var hash string
+		if err := pages.Scan(&hash, &p.URL, &p.Depth, &p.Status, &p.ContentType, &p.Truncated, &p.Error); err != nil {
 			pages.Close()
 			return run, err
 		}
+		pageIndex[hash] = len(run.Pages)
 		run.Pages = append(run.Pages, p)
 	}
 	err = pages.Err()
 	pages.Close()
+	if err != nil {
+		return run, err
+	}
+	nameRows, err := s.db.QueryContext(ctx, `SELECT url_hash,name FROM crawl_page_query_names WHERE run_id=? ORDER BY url_hash,sequence`, id)
+	if err != nil {
+		return run, err
+	}
+	for nameRows.Next() {
+		var hash, name string
+		if err := nameRows.Scan(&hash, &name); err != nil {
+			nameRows.Close()
+			return run, err
+		}
+		if index, ok := pageIndex[hash]; ok {
+			run.Pages[index].QueryNames = append(run.Pages[index].QueryNames, name)
+		}
+	}
+	err = nameRows.Err()
+	nameRows.Close()
 	if err != nil {
 		return run, err
 	}
