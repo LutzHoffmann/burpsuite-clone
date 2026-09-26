@@ -66,6 +66,7 @@ func NewServer(cfg Config) *Server {
 	srv.mux.HandleFunc("GET /api/active-checks/runs/{id}", srv.handleActiveChecksGet)
 	srv.mux.HandleFunc("POST /api/active-checks/runs/{id}/cancel", srv.handleActiveChecksCancel)
 	srv.mux.HandleFunc("DELETE /api/active-checks/runs/{id}", srv.handleActiveChecksDelete)
+	srv.mux.HandleFunc("GET /api/active-checks/runs/{id}/report.html", srv.handleActiveChecksReport)
 	srv.mux.HandleFunc("GET /api/websockets", srv.handleWSConnections)
 	srv.mux.HandleFunc("GET /api/websockets/{id}", srv.handleWSConnection)
 	srv.mux.HandleFunc("GET /api/websockets/{id}/messages", srv.handleWSMessages)

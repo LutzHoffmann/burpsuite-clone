@@ -33,6 +33,7 @@ Completed crawls can be used for separately confirmed, bounded active GET
 reflection checks. Their context labels are observations, not confirmed XSS.
 Both crawler and active GET checks accept optional, explicitly entered session
 headers for one run; they do not save credentials or perform automatic login.
+Finished active-check runs can be exported as a self-contained HTML report.
 See [active scanner setup and limits](docs/setup/active-scanner.md).
 
 WebSocket forwarding supports `ws://` and `wss://`, with a read-only message

@@ -75,3 +75,5 @@ are marked conservatively. No response body, marker value, original query
 value, or form value is stored. Runs can be cancelled, reopened, and deleted;
 restart marks unfinished runs interrupted. Automatic login, POST forms,
 JavaScript-driven inputs, and exploit confirmation are not covered.
+Finished runs can be downloaded as a self-contained HTML observation report;
+the report contains only the same redacted metadata shown in the workspace.

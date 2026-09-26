@@ -8,6 +8,7 @@ import (
 	"strconv"
 
 	"github.com/lutzifer/burpsuite-clone/internal/activechecks"
+	"github.com/lutzifer/burpsuite-clone/internal/reports"
 	"github.com/lutzifer/burpsuite-clone/internal/store"
 )
 
@@ -129,4 +130,36 @@ func (s *Server) handleActiveChecksCancel(w http.ResponseWriter, r *http.Request
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) handleActiveChecksReport(w http.ResponseWriter, r *http.Request) {
+	repository, ok := s.activeCheckStore(w)
+	if !ok {
+		return
+	}
+	id, err := activeCheckID(r)
+	if err != nil {
+		http.Error(w, "invalid run id", http.StatusBadRequest)
+		return
+	}
+	run, err := repository.GetActiveCheckRun(r.Context(), id)
+	if errors.Is(err, sql.ErrNoRows) {
+		http.Error(w, "run not found", http.StatusNotFound)
+		return
+	}
+	if err != nil {
+		http.Error(w, "get report data", http.StatusInternalServerError)
+		return
+	}
+	output, err := reports.ActiveCheckHTML(run)
+	if err != nil {
+		http.Error(w, "render report", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Content-Disposition", "attachment; filename=active-checks-"+strconv.FormatInt(id, 10)+".html")
+	w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(output)
 }

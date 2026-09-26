@@ -47,3 +47,38 @@ func TestActiveChecksAPI(t *testing.T) {
 		t.Fatalf("list=%d %s", rec.Code, rec.Body.String())
 	}
 }
+
+func TestActiveChecksReportAPI(t *testing.T) {
+	repository, err := store.OpenSQLite(filepath.Join(t.TempDir(), "report.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer repository.Close()
+	ctx := context.Background()
+	exchange := &store.Exchange{Method: "GET", Scheme: "https", Host: "example.test", Path: "/", Status: 200, InScope: true}
+	if err := repository.SaveExchange(ctx, exchange); err != nil {
+		t.Fatal(err)
+	}
+	crawlID, err := repository.CreateCrawlRun(ctx, exchange.ID, 1, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := repository.FinishCrawlRun(ctx, crawlID, "completed", ""); err != nil {
+		t.Fatal(err)
+	}
+	id, err := repository.CreateActiveCheckRun(ctx, crawlID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := repository.AppendActiveCheck(ctx, id, store.ActiveCheckObservation{URL: "https://example.test/<script>", Source: "query", Parameter: "q", Status: 200, Found: true, Context: "html_text"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repository.FinishActiveCheckRun(ctx, id, "completed", ""); err != nil {
+		t.Fatal(err)
+	}
+	s := NewServer(Config{Store: repository, APIAddr: "127.0.0.1:9080"})
+	rec := storageRequest(s, "GET", "/api/active-checks/runs/1/report.html", "")
+	if rec.Code != 200 || !strings.Contains(rec.Header().Get("Content-Type"), "text/html") || !strings.Contains(rec.Header().Get("Content-Disposition"), "attachment") || strings.Contains(rec.Body.String(), "<script>") {
+		t.Fatalf("report=%d headers=%v body=%s", rec.Code, rec.Header(), rec.Body.String())
+	}
+}

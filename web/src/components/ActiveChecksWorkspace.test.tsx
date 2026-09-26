@@ -24,6 +24,7 @@ it('requires confirmation and labels reflection as an observation', async () => 
   await userEvent.click(screen.getByRole('button', { name: 'Start active checks' }));
   expect(await screen.findByText(/Crawl #3 · completed/)).toBeInTheDocument();
   expect(screen.getByText(/observation, not confirmed XSS/)).toBeInTheDocument();
+  expect(screen.getByRole('link', { name: 'Download HTML report' })).toHaveAttribute('href', '/api/active-checks/runs/4/report.html');
   expect(bodies).toEqual([{ crawlId: 3, acknowledge: true, session: { cookie: 'sid=explicit', authorization: '' } }]);
   vi.unstubAllGlobals();
 });
