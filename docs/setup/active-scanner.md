@@ -46,3 +46,23 @@ job. Pages and form field names/types are saved without response bodies,
 query values, or form values; finished runs can be reopened or deleted. The last 100 runs are
 listed, with a 10,000-run project cap. Restarted jobs are marked interrupted.
 The crawler does not execute JavaScript or handle authenticated sessions.
+
+## Active checks from a crawl
+
+After a crawl completes, refresh the crawl list under Active checks and select
+that run. Starting checks requires a separate authorization confirmation. The
+service tests up to 25 discovered same-origin query or GET-form targets, up to
+five parameter names per target, and at most 100 requests total. Hidden,
+password, and file fields are skipped. It sends only synthetic single-parameter
+GET requests, never captured values, cookies, authorization headers, or POST
+forms. Scope is rechecked before every request; requests are sequential, at
+least 500 ms apart, and capped at five seconds and 64 KiB each. The whole run
+has a 60-second limit. Redirects and environment proxies are not used.
+
+The result records whether an exact random marker appeared in the response
+body and, if recognizable, its HTML context. It is an observation, **not** a
+confirmed XSS or injection vulnerability. Truncated and ambiguous responses
+are marked conservatively. No response body, marker value, original query
+value, or form value is stored. Runs can be cancelled, reopened, and deleted;
+restart marks unfinished runs interrupted. Authenticated sessions, POST forms,
+JavaScript-driven inputs, and exploit confirmation are not covered.

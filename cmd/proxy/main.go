@@ -15,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/lutzifer/burpsuite-clone/internal/activechecks"
 	"github.com/lutzifer/burpsuite-clone/internal/activescan"
 	"github.com/lutzifer/burpsuite-clone/internal/api"
 	"github.com/lutzifer/burpsuite-clone/internal/certs"
@@ -74,6 +75,13 @@ func main() {
 	if err != nil {
 		log.Fatalf("initialize crawler: %v", err)
 	}
+	if err := history.RecoverActiveCheckRuns(context.Background()); err != nil {
+		log.Fatalf("recover active checks: %v", err)
+	}
+	activeChecks, err := activechecks.New(history, history, history, intruderScope{scopeManager}, repeater.NewHTTPSender(nil))
+	if err != nil {
+		log.Fatalf("initialize active checks: %v", err)
+	}
 	targetService := target.NewService(history, scopeManager, hub, target.Limits{
 		MaxJSONDepth: 16, MaxFields: 1000, MaxMultipartFields: 100,
 	})
@@ -131,6 +139,7 @@ func main() {
 		Intruder:      intruderService,
 		ActiveScanner: activeScanner,
 		Crawler:       crawler,
+		ActiveChecks:  activeChecks,
 		MaxBodyBytes:  cfg.BodyLimitBytes,
 	})
 	httpServer := &http.Server{

@@ -29,6 +29,8 @@ local project and can be reopened after restart; it is not a confirmed
 vulnerability report. The separate bounded crawler discovers same-origin pages
 and form metadata without submitting forms or launching probes. GET endpoints
 may still have side effects; test only targets you are authorized to assess.
+Completed crawls can be used for separately confirmed, bounded active GET
+reflection checks. Their context labels are observations, not confirmed XSS.
 See [active scanner setup and limits](docs/setup/active-scanner.md).
 
 WebSocket forwarding supports `ws://` and `wss://`, with a read-only message

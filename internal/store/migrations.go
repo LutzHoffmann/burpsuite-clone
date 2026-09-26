@@ -22,6 +22,34 @@ var migrations = []migration{
 	{version: 9, apply: applyActiveScanSchema},
 	{version: 10, apply: applyCrawlSchema},
 	{version: 11, apply: applyCrawlQueryNamesSchema},
+	{version: 12, apply: applyActiveCheckSchema},
+}
+
+func applyActiveCheckSchema(tx *sql.Tx) error {
+	_, err := tx.Exec(`CREATE TABLE active_check_runs (
+ id INTEGER PRIMARY KEY AUTOINCREMENT,
+ project_id INTEGER NOT NULL REFERENCES projects(id),
+ crawl_id INTEGER NOT NULL REFERENCES crawl_runs(id) ON DELETE CASCADE,
+ state TEXT NOT NULL CHECK(state IN ('running','completed','cancelled','scope_revoked','failed','interrupted')),
+ reason TEXT NOT NULL DEFAULT '' CHECK(length(CAST(reason AS BLOB)) <= 64),
+ observation_count INTEGER NOT NULL DEFAULT 0 CHECK(observation_count BETWEEN 0 AND 100),
+ started_at_unix_nano INTEGER NOT NULL,
+ finished_at_unix_nano INTEGER
+);
+CREATE INDEX active_check_runs_project_id ON active_check_runs(project_id,id DESC);
+CREATE TABLE active_check_observations (
+ run_id INTEGER NOT NULL REFERENCES active_check_runs(id) ON DELETE CASCADE,
+ url TEXT NOT NULL CHECK(length(CAST(url AS BLOB)) BETWEEN 1 AND 4096),
+ source TEXT NOT NULL CHECK(source IN ('query','get_form')),
+ parameter TEXT NOT NULL CHECK(length(CAST(parameter AS BLOB)) BETWEEN 1 AND 256),
+ status INTEGER NOT NULL CHECK(status BETWEEN 0 AND 999),
+ found INTEGER NOT NULL CHECK(found IN (0,1)),
+ context TEXT NOT NULL CHECK(context IN ('unknown','plain_text','html_text','html_attribute','raw_text')),
+ partial INTEGER NOT NULL CHECK(partial IN (0,1)),
+ error TEXT NOT NULL CHECK(length(CAST(error AS BLOB)) <= 64),
+ PRIMARY KEY(run_id,url,source,parameter)
+);`)
+	return err
 }
 
 func applyCrawlQueryNamesSchema(tx *sql.Tx) error {

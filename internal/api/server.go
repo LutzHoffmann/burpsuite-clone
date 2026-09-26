@@ -29,6 +29,7 @@ type Config struct {
 	Intruder      IntruderService
 	ActiveScanner ActiveScanner
 	Crawler       Crawler
+	ActiveChecks  ActiveChecks
 	MaxBodyBytes  int64
 }
 
@@ -60,6 +61,11 @@ func NewServer(cfg Config) *Server {
 	srv.mux.HandleFunc("GET /api/crawl/runs/{id}", srv.handleCrawlGet)
 	srv.mux.HandleFunc("DELETE /api/crawl/runs/{id}", srv.handleCrawlDelete)
 	srv.mux.HandleFunc("POST /api/crawl/runs/{id}/cancel", srv.handleCrawlCancel)
+	srv.mux.HandleFunc("POST /api/active-checks/runs", srv.handleActiveChecksStart)
+	srv.mux.HandleFunc("GET /api/active-checks/runs", srv.handleActiveChecksList)
+	srv.mux.HandleFunc("GET /api/active-checks/runs/{id}", srv.handleActiveChecksGet)
+	srv.mux.HandleFunc("POST /api/active-checks/runs/{id}/cancel", srv.handleActiveChecksCancel)
+	srv.mux.HandleFunc("DELETE /api/active-checks/runs/{id}", srv.handleActiveChecksDelete)
 	srv.mux.HandleFunc("GET /api/websockets", srv.handleWSConnections)
 	srv.mux.HandleFunc("GET /api/websockets/{id}", srv.handleWSConnection)
 	srv.mux.HandleFunc("GET /api/websockets/{id}/messages", srv.handleWSMessages)

@@ -17,8 +17,8 @@ func TestIntruderMigrationCreatesProjectOwnedSchema(t *testing.T) {
 	if err := store.db.QueryRow(`SELECT MAX(version) FROM schema_migrations`).Scan(&version); err != nil {
 		t.Fatal(err)
 	}
-	if version != 11 {
-		t.Fatalf("schema version = %d, want 11", version)
+	if version != 12 {
+		t.Fatalf("schema version = %d, want 12", version)
 	}
 	for _, table := range []string{"intruder_jobs", "intruder_positions", "intruder_payload_sets", "intruder_payloads", "intruder_results"} {
 		var name string

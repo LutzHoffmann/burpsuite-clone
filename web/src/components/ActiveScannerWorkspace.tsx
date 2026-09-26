@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import type { Exchange } from '../types';
 import { CrawlWorkspace } from './CrawlWorkspace';
+import { ActiveChecksWorkspace } from './ActiveChecksWorkspace';
 
 interface Probe { parameter: string; status: number; reflected: boolean; partial: boolean; error?: string }
 interface Report { id?: number; runId?: number; historyId: number; state?: string; probeCount: number; stoppedReason?: string; probes: Probe[] }
@@ -93,5 +94,6 @@ export function ActiveScannerWorkspace({ exchange }: { exchange: Exchange | null
     {report && <div className="scanner-report"><h2>Scan #{report.runId ?? report.id} · {report.probeCount} {report.probeCount === 1 ? 'probe' : 'probes'} · {report.state ?? 'completed'}</h2>{report.stoppedReason && <p role="status">Stopped: {report.stoppedReason}</p>}{report.probes.map((probe) => <article key={probe.parameter}><strong>{probe.parameter}</strong><span>{probe.error ? 'Request failed' : `HTTP ${probe.status} · ${probe.reflected ? 'marker reflected' : 'no reflection observed'}${probe.partial ? ' · partial response capture' : ''}`}</span></article>)}</div>}
     <section className="scanner-history" aria-label="Saved scan history"><h2>Saved runs</h2><p>Recent project runs; only probe metadata is stored.</p>{historyError && <p className="api-error" role="alert">{historyError}</p>}{runs.length === 0 && <p className="scanner-notice">No saved runs yet.</p>}{runs.map((run) => <div key={run.id} className="scanner-history-row"><button type="button" className="quiet-button" onClick={() => void openRun(run.id)}>Open #{run.id} · {run.host}{run.path}</button><span>{run.state} · {run.probeCount} probes · {run.reflectedCount} reflected</span><button type="button" className="quiet-button" disabled={run.state === 'running'} onClick={() => void deleteRun(run.id)}>Delete scan #{run.id}</button></div>)}</section>
     <CrawlWorkspace exchange={exchange} />
+    <ActiveChecksWorkspace />
   </section>;
 }
