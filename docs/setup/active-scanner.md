@@ -65,7 +65,7 @@ service tests up to 25 discovered same-origin query or GET-form targets, up to
 five parameter names per target, and at most 100 requests total. Hidden,
 password, and file fields are skipped. Each GET request marks one parameter and
 keeps other query names with empty values; it never replays captured values,
-cookies, authorization headers, or POST
+captured cookies, captured authorization headers, or POST
 forms. Scope is rechecked before every request; requests are sequential, at
 least 500 ms apart, and capped at five seconds and 64 KiB each. The whole run
 has a 60-second limit. Redirects and environment proxies are not used.
