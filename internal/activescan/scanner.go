@@ -147,7 +147,12 @@ func (s *Scanner) Scan(ctx context.Context, input Request) (report Report, err e
 		}
 		marker := "scan-" + hex.EncodeToString(markerBytes)
 		target := *base
-		target.RawQuery = url.Values{name: []string{marker}}.Encode()
+		probeValues := url.Values{}
+		for key, original := range values {
+			probeValues[key] = make([]string, len(original))
+		}
+		probeValues.Set(name, marker)
+		target.RawQuery = probeValues.Encode()
 		if len(target.String()) > 8192 {
 			return report, ErrInvalidInput
 		}

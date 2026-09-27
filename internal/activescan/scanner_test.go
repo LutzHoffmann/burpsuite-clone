@@ -56,7 +56,9 @@ func (s *senderFake) Send(_ context.Context, request repeater.SendRequest, optio
 	}
 	u, _ := url.Parse(request.URL)
 	for _, values := range u.Query() {
-		return repeater.SendResult{Status: 200, Body: []byte("echo:" + values[0])}, nil
+		if len(values) > 0 && strings.HasPrefix(values[0], "scan-") {
+			return repeater.SendResult{Status: 200, Body: []byte("echo:" + values[0])}, nil
+		}
 	}
 	return repeater.SendResult{}, errors.New("no query")
 }
@@ -90,8 +92,18 @@ func TestScannerSendsOnlyBoundedCredentialFreeMarkers(t *testing.T) {
 			t.Fatalf("unsafe request=%+v", request)
 		}
 		parsed, _ := url.Parse(request.URL)
-		if len(parsed.Query()) != 1 || strings.Contains(request.URL, "secret") || strings.Contains(request.URL, "private") {
+		if len(parsed.Query()) != 2 || strings.Contains(request.URL, "secret") || strings.Contains(request.URL, "private") {
 			t.Fatalf("original values forwarded: %s", request.URL)
+		}
+		if parsed.Query().Get("a") != "" && len(parsed.Query()["b"]) != 2 {
+			t.Fatalf("other parameter multiplicity lost: %s", request.URL)
+		}
+		for _, values := range parsed.Query() {
+			for _, value := range values {
+				if value != "" && !strings.HasPrefix(value, "scan-") {
+					t.Fatalf("unexpected query value %q", value)
+				}
+			}
 		}
 	}
 	for _, options := range sender.options {
