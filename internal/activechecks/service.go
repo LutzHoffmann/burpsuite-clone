@@ -43,6 +43,22 @@ type candidate struct {
 	url, source string
 	names       []string
 }
+
+func probeTarget(raw, name, marker string) (string, error) {
+	target, err := url.Parse(raw)
+	if err != nil {
+		return "", err
+	}
+	query := target.Query()
+	for key, values := range query {
+		query[key] = make([]string, len(values))
+	}
+	query.Set(name, marker)
+	target.RawQuery = query.Encode()
+	target.Fragment = ""
+	return target.String(), nil
+}
+
 type Service struct {
 	history    History
 	crawls     CrawlReader
@@ -208,25 +224,24 @@ func (s *Service) run(ctx context.Context, id int64, candidates []candidate, ses
 				return
 			}
 			marker := "scan-" + hex.EncodeToString(markerBytes)
-			target, err := url.Parse(item.url)
+			target, err := probeTarget(item.url, name, marker)
 			if err != nil {
 				state = "failed"
 				reason = "invalid_target"
 				return
 			}
-			target.RawQuery = url.Values{name: {marker}}.Encode()
-			if len(target.String()) > 4096 {
+			if len(target) > 4096 {
 				state = "failed"
 				reason = "target_too_long"
 				return
 			}
-			if !s.scope.Allows(target.String()) {
+			if !s.scope.Allows(target) {
 				state = "scope_revoked"
 				reason = "scope_revoked"
 				return
 			}
 			lastSend = time.Now()
-			result, sendErr := s.sender.Send(ctx, repeater.SendRequest{Method: "GET", URL: target.String(), Headers: session.Headers("BurpSuiteClone-ActiveChecks/1")}, repeater.SendOptions{Timeout: 5 * time.Second, BodyLimitBytes: 64 << 10})
+			result, sendErr := s.sender.Send(ctx, repeater.SendRequest{Method: "GET", URL: target, Headers: session.Headers("BurpSuiteClone-ActiveChecks/1")}, repeater.SendOptions{Timeout: 5 * time.Second, BodyLimitBytes: 64 << 10})
 			observation := store.ActiveCheckObservation{URL: item.url, Source: item.source, Parameter: name, Context: "unknown"}
 			if sendErr != nil {
 				if ctx.Err() != nil {
