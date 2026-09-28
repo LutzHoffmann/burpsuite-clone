@@ -1053,7 +1053,7 @@ func TestProxyHTTPSMITMForwardsOutOfScopeWithoutIntercepting(t *testing.T) {
 	if exchange.InScope || exchange.ScopeVersion != 4 || exchange.ScopeRuleID != nil || exchange.Scheme != "https" {
 		t.Fatalf("exchange = %#v", exchange)
 	}
-	observed := observer.snapshot()
+	observed := waitForObservedExchanges(t, observer, 1)
 	if len(observed) != 1 || observed[0].ID != exchange.ID {
 		t.Fatalf("observed = %#v, exchange ID = %d", observed, exchange.ID)
 	}
@@ -2302,6 +2302,20 @@ func waitForSavedExchanges(t *testing.T, memory *memoryStore, count int) []*stor
 	}
 	saved := memory.snapshot()
 	t.Fatalf("saved exchanges = %d, want %d", len(saved), count)
+	return nil
+}
+
+func waitForObservedExchanges(t *testing.T, observer *recordingTargetObserver, count int) []*store.Exchange {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if observed := observer.snapshot(); len(observed) >= count {
+			return observed
+		}
+		time.Sleep(time.Millisecond)
+	}
+	observed := observer.snapshot()
+	t.Fatalf("observed exchanges = %d, want %d", len(observed), count)
 	return nil
 }
 
