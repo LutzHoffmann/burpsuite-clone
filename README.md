@@ -25,7 +25,8 @@ cookies cannot be represented. See [CSRF PoC limits](docs/setup/csrf-poc.md)
 and the [feature status](docs/feature-status.md) for remaining Burp-like gaps.
 
 API Import accepts local OpenAPI 3.0/3.1 JSON, lists supported endpoint methods,
-and opens editable Repeater drafts without sending traffic. See
+and opens editable Repeater drafts with parameters, JSON examples, or simple
+required-field templates without sending traffic. See
 [OpenAPI import limits](docs/setup/openapi-import.md).
 
 The History inspector includes a passive Findings tab for captured, in-scope
