@@ -562,12 +562,35 @@ func TestServiceEventsAreOrderedAndValueFree(t *testing.T) {
 	subscriber, unsubscribe := hub.Subscribe()
 	defer unsubscribe()
 	service := newRecoveredService(t, repository, repository, hub)
+	collected := make(chan []events.Event, 1)
+	stopCollecting := make(chan struct{})
+	defer close(stopCollecting)
+	go func() {
+		received := make([]events.Event, 0)
+		for {
+			select {
+			case event := <-subscriber:
+				received = append(received, event)
+				if event.Type == "target.rebuild.completed" || event.Type == "target.rebuild.failed" {
+					collected <- received
+					return
+				}
+			case <-stopCollecting:
+				return
+			}
+		}
+	}()
 
 	if _, err := service.ReplaceRules(context.Background(), 0, includeRule("example.test", "/")); err != nil {
 		t.Fatal(err)
 	}
 	waitForRebuildStatus(t, service, "active")
-	received := collectUntilEvent(t, subscriber, "target.rebuild.completed")
+	var received []events.Event
+	select {
+	case received = <-collected:
+	case <-time.After(testEventuallyTimeout):
+		t.Fatal("missing target rebuild terminal event")
+	}
 	if received[0].Type != "scope.changed" || received[1].Type != "target.rebuild.started" || received[len(received)-1].Type != "target.rebuild.completed" {
 		t.Fatalf("event sequence = %v", eventTypes(received))
 	}
