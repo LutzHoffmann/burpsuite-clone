@@ -11,6 +11,10 @@ Open **Workbench** in the navigation for three offline tools:
 - **Token analysis:** length, distinct characters, and observed Shannon
   entropy per character for one sample. This does not measure generator
   quality, predictability across samples, or cryptographic strength.
+- **JWT inspector:** decodes the header and claims of a three-part compact JWT
+  with a 64 KiB input limit. It does not verify the signature, expiry, issuer,
+  audience, or any other security property. Treat all displayed claims as
+  untrusted input.
 
 These inputs remain in the current browser tab's memory. They are not sent to
 the Go backend, saved in the project database, or synchronized elsewhere.

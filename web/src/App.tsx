@@ -34,6 +34,8 @@ import { StatusBar } from './components/StatusBar';
 import { TargetWorkspace } from './components/TargetWorkspace';
 import { WebSocketsWorkspace } from './components/WebSocketsWorkspace';
 import { Workbench } from './components/Workbench';
+import { ApiWorkspace } from './components/ApiWorkspace';
+import type { ApiWorkspaceState } from './components/ApiWorkspace';
 import type { Exchange, HistoryItem, InterceptConfig, InterceptItem, ScopeRule, SendRequest, SendResult, StatusDTO, TargetRefresh } from './types';
 
 const fallbackStatus: StatusDTO = {
@@ -151,11 +153,12 @@ export function App() {
   const configPending = useRef(false);
   const configRevision = useRef(0);
   const [repeaterRequest, setRepeaterRequest] = useState<SendRequest>(emptyRepeaterRequest);
+  const [apiImport, setAPIImport] = useState<ApiWorkspaceState>({ raw: '', baseUrl: '', inventory: null });
   const [repeaterResult, setRepeaterResult] = useState<SendResult | null>(null);
   const [intruderSource, setIntruderSource] = useState<IntruderSource | null>(null);
   const intruderHandoffRevision = useRef(0);
   const [apiErrors, setAPIErrors] = useState<Record<string, string | undefined>>({});
-  const [view, setViewState] = useState<'traffic' | 'repeater' | 'workbench' | 'target' | 'websockets' | 'intruder' | 'findings' | 'scanner' | 'settings'>('traffic');
+  const [view, setViewState] = useState<'traffic' | 'repeater' | 'workbench' | 'api' | 'target' | 'websockets' | 'intruder' | 'findings' | 'scanner' | 'settings'>('traffic');
   const wsLeaveGuard = useRef<() => boolean>(() => true);
   const intruderLeaveGuard = useRef<() => boolean>(() => true);
   const setView = (next: typeof view) => {
@@ -437,13 +440,14 @@ export function App() {
           <button className={`nav-item ${view === 'findings' ? 'active' : ''}`} onClick={() => setView('findings')} type="button"><Search size={17} />Findings</button>
           <button className={`nav-item ${view === 'scanner' ? 'active' : ''}`} onClick={() => setView('scanner')} type="button"><Crosshair size={17} />Scanner</button>
           <button className={`nav-item ${view === 'repeater' ? 'active' : ''}`} onClick={() => setView('repeater')} type="button"><Send size={17} />Repeater</button>
+          <button className={`nav-item ${view === 'api' ? 'active' : ''}`} onClick={() => setView('api')} type="button"><FileText size={17} />API Import</button>
           <button className={`nav-item ${view === 'workbench' ? 'active' : ''}`} onClick={() => setView('workbench')} type="button"><Braces size={17} />Workbench</button>
           <button className="nav-item" type="button" disabled title="Extension support is not implemented yet"><Boxes size={17} />Extensions</button>
           <div className="nav-spacer" />
           <button className={`nav-item ${view === 'settings' ? 'active' : ''}`} onClick={() => setView('settings')} type="button"><SlidersHorizontal size={17} />Settings</button>
         </nav>
 
-        {view === 'workbench' ? <Workbench /> : view === 'repeater' ? <section className="repeater-only" aria-label="Repeater workspace"><Repeater initialRequest={repeaterRequest} result={repeaterResult} onSend={(request) => void sendRepeater(request)} onSendToIntruder={sendRepeaterToIntruder} /></section> : view === 'intruder' ? <IntruderWorkspace leaveGuard={intruderLeaveGuard} source={intruderSource} onConsumeSource={() => setIntruderSource(null)} /> : view === 'scanner' ? <ActiveScannerWorkspace exchange={exchange} /> : view === 'findings' ? <FindingsWorkspace onOpenHistory={(id) => { setSelectedId(id); setView('traffic'); }} /> : view === 'websockets' ? <WebSocketsWorkspace leaveGuard={wsLeaveGuard} /> : view === 'target' ? <TargetWorkspace
+        {view === 'api' ? <ApiWorkspace value={apiImport} onChange={setAPIImport} onSendToRepeater={(request) => { setRepeaterRequest(request); setRepeaterResult(null); setView('repeater'); }} /> : view === 'workbench' ? <Workbench /> : view === 'repeater' ? <section className="repeater-only" aria-label="Repeater workspace"><Repeater initialRequest={repeaterRequest} result={repeaterResult} onSend={(request) => void sendRepeater(request)} onSendToIntruder={sendRepeaterToIntruder} /></section> : view === 'intruder' ? <IntruderWorkspace leaveGuard={intruderLeaveGuard} source={intruderSource} onConsumeSource={() => setIntruderSource(null)} /> : view === 'scanner' ? <ActiveScannerWorkspace exchange={exchange} /> : view === 'findings' ? <FindingsWorkspace onOpenHistory={(id) => { setSelectedId(id); setView('traffic'); }} /> : view === 'websockets' ? <WebSocketsWorkspace leaveGuard={wsLeaveGuard} /> : view === 'target' ? <TargetWorkspace
           refresh={targetRefresh}
           onOpenHistory={(id) => { setSelectedId(id); setView('traffic'); }}
           onSendToRepeater={(id) => { setView('traffic'); void sendHistoryToRepeater(id); }}

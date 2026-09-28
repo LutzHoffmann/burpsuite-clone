@@ -14,7 +14,8 @@ text and hex payloads, and paged results. See
 [Intruder setup and current limits](docs/setup/intruder.md).
 
 The local Workbench adds text Decoder (URL, Base64, hex, HTML entities),
-line-based Comparer, and single-sample token distribution metrics. It runs in
+line-based Comparer, single-sample token distribution metrics, and an
+unverified JWT header/claims inspector. It runs in
 the browser without saving or sending tool input. See
 [Workbench usage and limits](docs/setup/workbench.md).
 
@@ -22,6 +23,10 @@ Repeater can generate a manual CSRF proof-of-concept HTML form from GET or
 form-urlencoded POST drafts. The form never auto-submits; custom headers and
 cookies cannot be represented. See [CSRF PoC limits](docs/setup/csrf-poc.md)
 and the [feature status](docs/feature-status.md) for remaining Burp-like gaps.
+
+API Import accepts local OpenAPI 3.0/3.1 JSON, lists supported endpoint methods,
+and opens editable Repeater drafts without sending traffic. See
+[OpenAPI import limits](docs/setup/openapi-import.md).
 
 The History inspector includes a passive Findings tab for captured, in-scope
 responses. It currently checks selected HTTPS cookie and security-header

@@ -197,6 +197,18 @@ test('opens Repeater as a focused workspace', async () => {
   expect(screen.getByText('Request Editor')).toBeInTheDocument();
 });
 
+test('keeps imported OpenAPI endpoints when handing a draft to Repeater', async () => {
+  await renderSettledApp();
+  await userEvent.click(screen.getByRole('button', { name: 'API Import' }));
+  fireEvent.change(screen.getByLabelText('OpenAPI JSON'), { target: { value: JSON.stringify({ openapi: '3.0.0', servers: [{ url: 'https://api.example.test/v1' }], paths: { '/items': { get: { summary: 'List items' } } } }) } });
+  await userEvent.click(screen.getByRole('button', { name: 'Import specification' }));
+  await userEvent.click(screen.getByRole('button', { name: 'Send GET /items to Repeater' }));
+  expect(screen.getByRole('button', { name: 'Repeater' })).toHaveClass('active');
+  expect(screen.getByRole('textbox', { name: 'URL' })).toHaveValue('https://api.example.test/v1/items');
+  await userEvent.click(screen.getByRole('button', { name: 'API Import' }));
+  expect(screen.getByText('List items')).toBeInTheDocument();
+});
+
 test('shows history columns and inspector tabs', async () => {
   await renderSettledApp();
   expect(screen.getByText('Method')).toBeInTheDocument();

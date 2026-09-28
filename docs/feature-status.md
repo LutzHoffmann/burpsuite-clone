@@ -16,8 +16,8 @@ parity.
 | Passive findings | Selected response-header and cookie checks | Not a comprehensive passive scanner |
 | Active scanner | Bounded GET reflection observations | No broad vulnerability coverage or confirmed findings |
 | Authenticated testing | Explicit one-run Cookie/Authorization headers for crawl and active checks | No login automation, refresh, or session-expiry handling |
-| API testing | HTTP requests can be inspected and replayed | No OpenAPI, GraphQL, or SOAP import/scanning |
-| Decoder, Comparer, token analysis | Browser-local text utilities | No generator-quality analysis across token samples |
+| API testing | Local OpenAPI 3.0/3.1 JSON endpoint inventory and Repeater handoff | No YAML, GraphQL, SOAP, schema-driven requests, or API scanning |
+| Decoder, Comparer, token/JWT inspection | Browser-local text utilities | No generator-quality analysis across samples or JWT signature verification |
 | Reports | HTML export of active-check observations | No unified findings report, PDF, or XML export |
 | OAST, DOM testing, custom checks | Not implemented | Requires separate infrastructure and substantial scanner work |
 | Extensions, collaboration | Not implemented | No BApp/Montoya compatibility, plugin API, or shared project server |

@@ -42,3 +42,13 @@ it('shows token metrics with an explicit security caveat', async () => {
   expect(screen.getByText('1.00 bits/character')).toBeInTheDocument();
   expect(screen.getByText(/not a security guarantee/i)).toBeInTheDocument();
 });
+
+it('inspects JWT claims without claiming signature verification', async () => {
+  const segment = (value: object) => btoa(JSON.stringify(value)).replace(/=/g, '');
+  render(<Workbench />);
+  await userEvent.click(screen.getByRole('button', { name: 'JWT inspector' }));
+  await userEvent.type(screen.getByLabelText('JWT text'), `${segment({ alg: 'HS256' })}.${segment({ sub: 'alice' })}.c2ln`);
+  await userEvent.click(screen.getByRole('button', { name: 'Inspect JWT' }));
+  expect(screen.getByText(/"sub": "alice"/)).toBeInTheDocument();
+  expect(screen.getByText(/signature is not verified/i)).toBeInTheDocument();
+});

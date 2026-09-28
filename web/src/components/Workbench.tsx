@@ -1,8 +1,10 @@
 import { useState } from 'react';
 import { analyzeToken, compareLines, transform } from '../tools/workbench';
 import type { DiffLine, Direction, Encoding } from '../tools/workbench';
+import { inspectJwt } from '../tools/jwt';
+import type { JwtInspection } from '../tools/jwt';
 
-type Tool = 'decoder' | 'comparer' | 'token';
+type Tool = 'decoder' | 'comparer' | 'token' | 'jwt';
 
 function message(error: unknown): string {
   return error instanceof Error ? error.message : 'Operation failed';
@@ -19,6 +21,8 @@ export function Workbench() {
   const [diff, setDiff] = useState<DiffLine[] | null>(null);
   const [token, setToken] = useState('');
   const [metrics, setMetrics] = useState<ReturnType<typeof analyzeToken> | null>(null);
+  const [jwt, setJwt] = useState('');
+  const [jwtResult, setJwtResult] = useState<JwtInspection | null>(null);
   const [error, setError] = useState('');
 
   const choose = (next: Tool) => { setTool(next); setError(''); };
@@ -34,17 +38,22 @@ export function Workbench() {
     try { setMetrics(analyzeToken(token)); setError(''); }
     catch (cause) { setMetrics(null); setError(message(cause)); }
   };
+  const runJWT = () => {
+    try { setJwtResult(inspectJwt(jwt)); setError(''); }
+    catch (cause) { setJwtResult(null); setError(message(cause)); }
+  };
 
   return <section className="workbench" aria-label="Local tools">
     <header className="workbench-header">
       <span className="eyebrow">Offline utilities</span>
       <h1>Workbench</h1>
-      <p>Decode data, compare text, and inspect token distributions. These tools run in your browser; inputs are not uploaded or saved.</p>
+      <p>Decode data, compare text, and inspect tokens. These tools run in your browser; inputs are not uploaded or saved.</p>
     </header>
     <nav className="workbench-tabs" aria-label="Workbench tools">
       <button type="button" aria-current={tool === 'decoder' ? 'page' : undefined} onClick={() => choose('decoder')}>Decoder</button>
       <button type="button" aria-current={tool === 'comparer' ? 'page' : undefined} onClick={() => choose('comparer')}>Comparer</button>
       <button type="button" aria-current={tool === 'token' ? 'page' : undefined} onClick={() => choose('token')}>Token analysis</button>
+      <button type="button" aria-current={tool === 'jwt' ? 'page' : undefined} onClick={() => choose('jwt')}>JWT inspector</button>
     </nav>
     {error && <p className="workbench-error" role="alert">{error}</p>}
     {tool === 'decoder' && <section className="workbench-panel" aria-label="Decoder">
@@ -74,6 +83,12 @@ export function Workbench() {
       <button type="button" onClick={runAnalyze}>Analyze token</button>
       {metrics && <dl className="workbench-metrics"><div><dt>Length</dt><dd>{metrics.length} characters</dd></div><div><dt>Distinct characters</dt><dd>{metrics.unique}</dd></div><div><dt>Observed Shannon entropy</dt><dd>{metrics.entropy.toFixed(2)} bits/character</dd></div></dl>}
       <p className="workbench-hint">A single sample's character distribution is not a security guarantee. This does not test the token generator or predictability across samples.</p>
+    </section>}
+    {tool === 'jwt' && <section className="workbench-panel" aria-label="JWT inspector">
+      <label>JWT<textarea aria-label="JWT text" value={jwt} onChange={(event) => { setJwt(event.target.value); setJwtResult(null); }} spellCheck={false} /></label>
+      <button type="button" onClick={runJWT}>Inspect JWT</button>
+      {jwtResult && <div className="workbench-jwt"><div><h2>Header</h2><pre>{JSON.stringify(jwtResult.header, null, 2)}</pre></div><div><h2>Claims</h2><pre>{JSON.stringify(jwtResult.payload, null, 2)}</pre></div></div>}
+      <p className="workbench-hint">The signature is not verified. Decoded claims are untrusted; this tool does not validate expiry, issuer, audience, or cryptographic strength.</p>
     </section>}
   </section>;
 }
