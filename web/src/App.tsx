@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { Boxes, FileText, History, Map, Network, Search, Send, SlidersHorizontal, Crosshair } from 'lucide-react';
+import { Boxes, Braces, FileText, History, Map, Network, Search, Send, SlidersHorizontal, Crosshair } from 'lucide-react';
 import {
   ApiError,
   dropIntercept as dropInterceptAPI,
@@ -33,6 +33,7 @@ import { Settings } from './components/Settings';
 import { StatusBar } from './components/StatusBar';
 import { TargetWorkspace } from './components/TargetWorkspace';
 import { WebSocketsWorkspace } from './components/WebSocketsWorkspace';
+import { Workbench } from './components/Workbench';
 import type { Exchange, HistoryItem, InterceptConfig, InterceptItem, ScopeRule, SendRequest, SendResult, StatusDTO, TargetRefresh } from './types';
 
 const fallbackStatus: StatusDTO = {
@@ -154,7 +155,7 @@ export function App() {
   const [intruderSource, setIntruderSource] = useState<IntruderSource | null>(null);
   const intruderHandoffRevision = useRef(0);
   const [apiErrors, setAPIErrors] = useState<Record<string, string | undefined>>({});
-  const [view, setViewState] = useState<'traffic' | 'target' | 'websockets' | 'intruder' | 'findings' | 'scanner' | 'settings'>('traffic');
+  const [view, setViewState] = useState<'traffic' | 'repeater' | 'workbench' | 'target' | 'websockets' | 'intruder' | 'findings' | 'scanner' | 'settings'>('traffic');
   const wsLeaveGuard = useRef<() => boolean>(() => true);
   const intruderLeaveGuard = useRef<() => boolean>(() => true);
   const setView = (next: typeof view) => {
@@ -429,19 +430,20 @@ export function App() {
       <div className="workspace">
         <nav className="navigation" aria-label="Tools">
           <button className={`nav-item ${view === 'traffic' ? 'active' : ''}`} onClick={() => setView('traffic')} type="button"><Network size={17} />Traffic</button>
-          <button className="nav-item" type="button"><History size={17} />History</button>
+          <button className="nav-item" onClick={() => setView('traffic')} type="button"><History size={17} />History</button>
           <button className={`nav-item ${view === 'websockets' ? 'active' : ''}`} onClick={() => setView('websockets')} type="button"><Network size={17} />WebSockets</button>
           <button className={`nav-item ${view === 'target' ? 'active' : ''}`} onClick={openTarget} type="button"><Map size={17} />Target</button>
           <button className={`nav-item ${view === 'intruder' ? 'active' : ''}`} onClick={() => setView('intruder')} type="button"><Crosshair size={17} />Intruder</button>
           <button className={`nav-item ${view === 'findings' ? 'active' : ''}`} onClick={() => setView('findings')} type="button"><Search size={17} />Findings</button>
           <button className={`nav-item ${view === 'scanner' ? 'active' : ''}`} onClick={() => setView('scanner')} type="button"><Crosshair size={17} />Scanner</button>
-          <button className="nav-item" type="button"><Send size={17} />Repeater</button>
-          <button className="nav-item" type="button"><Boxes size={17} />Extensions</button>
+          <button className={`nav-item ${view === 'repeater' ? 'active' : ''}`} onClick={() => setView('repeater')} type="button"><Send size={17} />Repeater</button>
+          <button className={`nav-item ${view === 'workbench' ? 'active' : ''}`} onClick={() => setView('workbench')} type="button"><Braces size={17} />Workbench</button>
+          <button className="nav-item" type="button" disabled title="Extension support is not implemented yet"><Boxes size={17} />Extensions</button>
           <div className="nav-spacer" />
           <button className={`nav-item ${view === 'settings' ? 'active' : ''}`} onClick={() => setView('settings')} type="button"><SlidersHorizontal size={17} />Settings</button>
         </nav>
 
-        {view === 'intruder' ? <IntruderWorkspace leaveGuard={intruderLeaveGuard} source={intruderSource} onConsumeSource={() => setIntruderSource(null)} /> : view === 'scanner' ? <ActiveScannerWorkspace exchange={exchange} /> : view === 'findings' ? <FindingsWorkspace onOpenHistory={(id) => { setSelectedId(id); setView('traffic'); }} /> : view === 'websockets' ? <WebSocketsWorkspace leaveGuard={wsLeaveGuard} /> : view === 'target' ? <TargetWorkspace
+        {view === 'workbench' ? <Workbench /> : view === 'repeater' ? <section className="repeater-only" aria-label="Repeater workspace"><Repeater initialRequest={repeaterRequest} result={repeaterResult} onSend={(request) => void sendRepeater(request)} onSendToIntruder={sendRepeaterToIntruder} /></section> : view === 'intruder' ? <IntruderWorkspace leaveGuard={intruderLeaveGuard} source={intruderSource} onConsumeSource={() => setIntruderSource(null)} /> : view === 'scanner' ? <ActiveScannerWorkspace exchange={exchange} /> : view === 'findings' ? <FindingsWorkspace onOpenHistory={(id) => { setSelectedId(id); setView('traffic'); }} /> : view === 'websockets' ? <WebSocketsWorkspace leaveGuard={wsLeaveGuard} /> : view === 'target' ? <TargetWorkspace
           refresh={targetRefresh}
           onOpenHistory={(id) => { setSelectedId(id); setView('traffic'); }}
           onSendToRepeater={(id) => { setView('traffic'); void sendHistoryToRepeater(id); }}

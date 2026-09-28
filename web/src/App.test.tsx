@@ -181,6 +181,22 @@ test('renders operator shell status', async () => {
   expect(screen.getByText('Repeater')).toBeInTheDocument();
 });
 
+test('opens the local workbench and returns to History', async () => {
+  await renderSettledApp();
+  await userEvent.click(screen.getByRole('button', { name: 'Workbench' }));
+  expect(screen.getByRole('region', { name: 'Local tools' })).toBeInTheDocument();
+  await userEvent.click(screen.getByRole('button', { name: 'History' }));
+  expect(screen.getByRole('region', { name: 'Request history' })).toBeInTheDocument();
+});
+
+test('opens Repeater as a focused workspace', async () => {
+  await renderSettledApp();
+  await userEvent.click(screen.getByRole('button', { name: 'Repeater' }));
+  expect(screen.getByRole('button', { name: 'Repeater' })).toHaveClass('active');
+  expect(screen.queryByRole('region', { name: 'Request history' })).not.toBeInTheDocument();
+  expect(screen.getByText('Request Editor')).toBeInTheDocument();
+});
+
 test('shows history columns and inspector tabs', async () => {
   await renderSettledApp();
   expect(screen.getByText('Method')).toBeInTheDocument();
