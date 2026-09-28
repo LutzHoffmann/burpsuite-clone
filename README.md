@@ -31,7 +31,8 @@ required-field templates without sending traffic. See
 
 The History inspector includes a passive Findings tab for captured, in-scope
 responses. It currently checks selected HTTPS cookie and security-header
-conditions without sending traffic or claiming confirmed vulnerabilities.
+conditions, including Secure, HttpOnly, SameSite, and nosniff presence, without
+sending traffic or claiming confirmed vulnerabilities.
 The project-wide Findings view groups the same observations by host and type,
 supports filtering, and links each group to the latest matching History entry.
 It computes results from retained response headers, including older captures;

@@ -58,16 +58,27 @@ func passiveTypes(scheme, mime string, headers map[string][]string) []struct{ ki
 			if !ok || name == "" || strings.ContainsAny(name, " \t\r\n;,\x7f") {
 				continue
 			}
-			secure := false
+			secure, httpOnly, sameSite := false, false, false
 			parts := strings.Split(cookie, ";")
 			for _, part := range parts[1:] {
-				if strings.EqualFold(strings.TrimSpace(part), "Secure") {
+				attribute, _, _ := strings.Cut(strings.TrimSpace(part), "=")
+				switch {
+				case strings.EqualFold(attribute, "Secure"):
 					secure = true
-					break
+				case strings.EqualFold(attribute, "HttpOnly"):
+					httpOnly = true
+				case strings.EqualFold(attribute, "SameSite"):
+					sameSite = true
 				}
 			}
 			if !secure {
 				found = append(found, struct{ kind, subject string }{"cookie_secure_missing", name})
+			}
+			if !httpOnly {
+				found = append(found, struct{ kind, subject string }{"cookie_httponly_missing", name})
+			}
+			if !sameSite {
+				found = append(found, struct{ kind, subject string }{"cookie_samesite_missing", name})
 			}
 		}
 	}
@@ -77,8 +88,19 @@ func passiveTypes(scheme, mime string, headers map[string][]string) []struct{ ki
 			mime = values[0]
 		}
 	}
-	if strings.HasPrefix(strings.ToLower(mime), "text/html") && len(passiveHeaderValues(headers, "Content-Security-Policy")) == 0 {
-		found = append(found, struct{ kind, subject string }{"csp_missing", ""})
+	if strings.HasPrefix(strings.ToLower(mime), "text/html") {
+		if len(passiveHeaderValues(headers, "Content-Security-Policy")) == 0 {
+			found = append(found, struct{ kind, subject string }{"csp_missing", ""})
+		}
+		nosniff := false
+		for _, value := range passiveHeaderValues(headers, "X-Content-Type-Options") {
+			if strings.EqualFold(strings.TrimSpace(value), "nosniff") {
+				nosniff = true
+			}
+		}
+		if !nosniff {
+			found = append(found, struct{ kind, subject string }{"nosniff_missing", ""})
+		}
 	}
 	return found
 }

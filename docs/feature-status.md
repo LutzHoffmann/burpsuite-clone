@@ -13,7 +13,7 @@ parity.
 | Repeater and CSRF PoC | Manual replay and GET/form-POST PoC generation | No request sequences or macros; PoC does not prove exploitability |
 | Intruder | Bounded, persistent fuzzing with four attack modes | Not Turbo Intruder-scale throughput |
 | Crawler | Bounded same-origin GET crawl | No JavaScript rendering, automatic login, or form submission |
-| Passive findings | Selected response-header and cookie checks | Not a comprehensive passive scanner |
+| Passive findings | HSTS, CSP, nosniff, and selected HTTPS cookie-attribute observations | Not a comprehensive passive scanner; missing attributes are not confirmed vulnerabilities |
 | Active scanner | Bounded GET reflection observations | No broad vulnerability coverage or confirmed findings |
 | Authenticated testing | Explicit one-run Cookie/Authorization headers for crawl and active checks | No login automation, refresh, or session-expiry handling |
 | API testing | Local OpenAPI 3.0/3.1 JSON inventory with parameter/example and simple required-field Repeater drafts | No YAML, GraphQL, SOAP, full schema execution, or API scanning |

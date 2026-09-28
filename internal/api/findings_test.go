@@ -26,6 +26,10 @@ func TestFindingsAPI(t *testing.T) {
 	if rec.Code != 200 || json.Unmarshal(rec.Body.Bytes(), &page) != nil || len(page.Items) != 1 || page.Items[0].LatestExchangeID != e.ID {
 		t.Fatalf("response %d %s", rec.Code, rec.Body.String())
 	}
+	rec = storageRequest(s, "GET", "/api/findings?type=nosniff_missing", "")
+	if rec.Code != 200 || json.Unmarshal(rec.Body.Bytes(), &page) != nil || len(page.Items) != 1 || page.Items[0].Type != "nosniff_missing" {
+		t.Fatalf("nosniff response %d %s", rec.Code, rec.Body.String())
+	}
 	for _, query := range []string{"type=unknown", "offset=-1", "offset=1", "snapshotId=0", "host=a&host=b", "bad=1", "host=%zz"} {
 		if got := storageRequest(s, "GET", "/api/findings?"+query, ""); got.Code != 400 {
 			t.Errorf("%s -> %d", query, got.Code)

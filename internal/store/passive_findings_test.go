@@ -25,7 +25,7 @@ func TestPassiveFindingsGroupFilterAndSnapshot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if page.SnapshotID != 3 || len(page.Items) != 3 {
+	if page.SnapshotID != 3 || len(page.Items) != 5 {
 		t.Fatalf("page=%+v", page)
 	}
 	for _, item := range page.Items {
@@ -39,11 +39,11 @@ func TestPassiveFindingsGroupFilterAndSnapshot(t *testing.T) {
 	}
 	save("new.test", true, nil)
 	old, err := s.ListPassiveFindings(ctx, FindingsRequest{SnapshotID: page.SnapshotID})
-	if err != nil || len(old.Items) != 3 {
+	if err != nil || len(old.Items) != 5 {
 		t.Fatalf("snapshot=%+v, %v", old, err)
 	}
 	fresh, err := s.ListPassiveFindings(ctx, FindingsRequest{})
-	if err != nil || len(fresh.Items) != 5 {
+	if err != nil || len(fresh.Items) != 8 {
 		t.Fatalf("fresh=%+v, %v", fresh, err)
 	}
 }
@@ -65,6 +65,36 @@ func TestPassiveFindingsNoSensitiveHeaderValues(t *testing.T) {
 	}
 }
 
+func TestPassiveTypesCookieAndNosniffObservations(t *testing.T) {
+	headers := map[string][]string{
+		"set-cookie":                {"sid=secret; Secure; SameSite=Lax", "prefs=theme; Secure; HttpOnly; SameSite=Strict"},
+		"CONTENT-TYPE":              {"text/html; charset=utf-8"},
+		"Strict-Transport-Security": {"max-age=31536000"},
+		"Content-Security-Policy":   {"default-src 'self'"},
+	}
+	issues := passiveTypes("https", "", headers)
+	if len(issues) != 2 || issues[0].kind != "cookie_httponly_missing" || issues[0].subject != "sid" || issues[1].kind != "nosniff_missing" {
+		t.Fatalf("issues=%+v", issues)
+	}
+	headers["set-cookie"] = append(headers["set-cookie"], "third=opaque; Secure; HttpOnly")
+	issues = passiveTypes("https", "", headers)
+	found := false
+	for _, issue := range issues {
+		if issue.kind == "cookie_samesite_missing" && issue.subject == "third" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("SameSite observation missing: %+v", issues)
+	}
+	headers["X-Content-Type-Options"] = []string{"nosniff"}
+	for _, issue := range passiveTypes("http", "text/plain", headers) {
+		if issue.kind == "nosniff_missing" || issue.kind == "cookie_httponly_missing" || issue.kind == "cookie_samesite_missing" {
+			t.Fatalf("unexpected observation on plain HTTP text: %+v", issue)
+		}
+	}
+}
+
 func TestPassiveFindingsPagesMoreThanHundredGroups(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()
@@ -79,7 +109,7 @@ func TestPassiveFindingsPagesMoreThanHundredGroups(t *testing.T) {
 		t.Fatalf("first=%+v, %v", first, err)
 	}
 	second, err := s.ListPassiveFindings(ctx, FindingsRequest{Offset: first.NextOffset, SnapshotID: first.SnapshotID})
-	if err != nil || len(second.Items) != 2 || second.NextOffset != 0 {
+	if err != nil || len(second.Items) != 53 || second.NextOffset != 0 {
 		t.Fatalf("second=%+v, %v", second, err)
 	}
 	seen := map[string]bool{}

@@ -15,6 +15,9 @@ it('filters, pages with a snapshot, and opens the latest History exchange', asyn
   }));
   render(<FindingsWorkspace onOpenHistory={open} />);
   expect(await screen.findByText('Cookie without Secure attribute')).toBeInTheDocument();
+  expect(screen.getByRole('option', { name: 'Cookie without HttpOnly' })).toBeInTheDocument();
+  expect(screen.getByRole('option', { name: 'Cookie without SameSite' })).toBeInTheDocument();
+  expect(screen.getByRole('option', { name: 'nosniff not observed' })).toBeInTheDocument();
   await userEvent.type(screen.getByLabelText('Exact host'), 'example.test');
   await userEvent.selectOptions(screen.getByLabelText('Finding type'), 'cookie_secure_missing');
   await userEvent.click(screen.getByRole('button', { name: 'Apply filters' }));

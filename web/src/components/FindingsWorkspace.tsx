@@ -20,6 +20,9 @@ const titles: Record<string, string> = {
   hsts_missing: 'HSTS header not observed',
   csp_missing: 'CSP header not observed',
   cookie_secure_missing: 'Cookie without Secure attribute',
+  cookie_httponly_missing: 'Cookie without HttpOnly attribute',
+  cookie_samesite_missing: 'Cookie without explicit SameSite attribute',
+  nosniff_missing: 'X-Content-Type-Options: nosniff not observed',
 };
 
 export function FindingsWorkspace({ onOpenHistory }: { onOpenHistory: (id: number) => void }) {
@@ -63,10 +66,10 @@ export function FindingsWorkspace({ onOpenHistory }: { onOpenHistory: (id: numbe
 
   const apply = () => { setOffset(0); setSnapshot(0); setHost(hostInput.trim()); setType(typeInput); setRefresh((value) => value + 1); };
   return <section className="findings-workspace" aria-label="Passive findings">
-    <header className="findings-header"><span className="eyebrow">Captured traffic only</span><h1>Passive findings</h1><p>Grouped observations from in-scope History responses. No requests are sent. These are not confirmed vulnerabilities.</p></header>
+    <header className="findings-header"><span className="eyebrow">Captured traffic only</span><h1>Passive findings</h1><p>Grouped header and cookie observations from in-scope History responses. No requests are sent. Missing attributes alone do not confirm a vulnerability.</p></header>
     <form className="findings-controls" onSubmit={(event) => { event.preventDefault(); apply(); }}>
       <label>Exact host<input value={hostInput} onChange={(event) => setHostInput(event.target.value)} placeholder="All hosts" /></label>
-      <label>Finding type<select value={typeInput} onChange={(event) => setTypeInput(event.target.value)}><option value="">All types</option><option value="hsts_missing">HSTS not observed</option><option value="csp_missing">CSP not observed</option><option value="cookie_secure_missing">Cookie without Secure</option></select></label>
+      <label>Finding type<select value={typeInput} onChange={(event) => setTypeInput(event.target.value)}><option value="">All types</option><option value="hsts_missing">HSTS not observed</option><option value="csp_missing">CSP not observed</option><option value="nosniff_missing">nosniff not observed</option><option value="cookie_secure_missing">Cookie without Secure</option><option value="cookie_httponly_missing">Cookie without HttpOnly</option><option value="cookie_samesite_missing">Cookie without SameSite</option></select></label>
       <button type="submit" className="quiet-button">Apply filters</button>
       <button type="button" className="quiet-button" onClick={() => { setOffset(0); setSnapshot(0); setRefresh((value) => value + 1); }}>Refresh</button>
     </form>

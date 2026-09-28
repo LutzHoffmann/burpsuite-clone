@@ -34,7 +34,7 @@ func (s *Server) handleFindings(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid host", http.StatusBadRequest)
 		return
 	}
-	if request.Type != "" && request.Type != "hsts_missing" && request.Type != "csp_missing" && request.Type != "cookie_secure_missing" {
+	if request.Type != "" && request.Type != "hsts_missing" && request.Type != "csp_missing" && request.Type != "cookie_secure_missing" && request.Type != "cookie_httponly_missing" && request.Type != "cookie_samesite_missing" && request.Type != "nosniff_missing" {
 		http.Error(w, "invalid type", http.StatusBadRequest)
 		return
 	}
