@@ -18,6 +18,11 @@ line-based Comparer, and single-sample token distribution metrics. It runs in
 the browser without saving or sending tool input. See
 [Workbench usage and limits](docs/setup/workbench.md).
 
+Repeater can generate a manual CSRF proof-of-concept HTML form from GET or
+form-urlencoded POST drafts. The form never auto-submits; custom headers and
+cookies cannot be represented. See [CSRF PoC limits](docs/setup/csrf-poc.md)
+and the [feature status](docs/feature-status.md) for remaining Burp-like gaps.
+
 The History inspector includes a passive Findings tab for captured, in-scope
 responses. It currently checks selected HTTPS cookie and security-header
 conditions without sending traffic or claiming confirmed vulnerabilities.

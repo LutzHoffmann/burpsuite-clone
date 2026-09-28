@@ -1,0 +1,27 @@
+# Burp-like feature status
+
+This project is an independent local testing suite, not a complete or
+compatible replacement for Burp Suite Professional. This inventory tracks
+the original requested categories without treating partial tools as full
+parity.
+
+| Area | Current state | Important gap |
+| --- | --- | --- |
+| HTTP/HTTPS proxy, interception, replacements | Implemented for local manual work | No integrated dedicated browser; protocol coverage is not Burp parity |
+| WebSockets | Forwarding, history, and manual replay | Not a full message-interception or extension platform |
+| Target scope, Site Map, History | Implemented with local SQLite storage | No team workspace or cloud sync |
+| Repeater and CSRF PoC | Manual replay and GET/form-POST PoC generation | No request sequences or macros; PoC does not prove exploitability |
+| Intruder | Bounded, persistent fuzzing with four attack modes | Not Turbo Intruder-scale throughput |
+| Crawler | Bounded same-origin GET crawl | No JavaScript rendering, automatic login, or form submission |
+| Passive findings | Selected response-header and cookie checks | Not a comprehensive passive scanner |
+| Active scanner | Bounded GET reflection observations | No broad vulnerability coverage or confirmed findings |
+| Authenticated testing | Explicit one-run Cookie/Authorization headers for crawl and active checks | No login automation, refresh, or session-expiry handling |
+| API testing | HTTP requests can be inspected and replayed | No OpenAPI, GraphQL, or SOAP import/scanning |
+| Decoder, Comparer, token analysis | Browser-local text utilities | No generator-quality analysis across token samples |
+| Reports | HTML export of active-check observations | No unified findings report, PDF, or XML export |
+| OAST, DOM testing, custom checks | Not implemented | Requires separate infrastructure and substantial scanner work |
+| Extensions, collaboration | Not implemented | No BApp/Montoya compatibility, plugin API, or shared project server |
+
+The app should be used only for authorized testing. A green CI run verifies
+the implemented subset, not Burp feature parity or the absence of security
+bugs.
