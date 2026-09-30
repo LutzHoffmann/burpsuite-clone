@@ -95,6 +95,72 @@ func TestServiceChecksDiscoveredGETInputs(t *testing.T) {
 	}
 }
 
+func TestServiceOptionalRedirectCheckDoesNotFollowLocation(t *testing.T) {
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		if strings.Contains(r.URL.RawQuery, "original-secret") {
+			t.Error("original query value was forwarded")
+		}
+		if next := r.URL.Query().Get("next"); strings.HasPrefix(next, "https://redirect-check.invalid/") {
+			w.Header().Set("Location", next)
+			w.WriteHeader(http.StatusFound)
+		}
+	}))
+	defer server.Close()
+	s, err := store.OpenSQLite(filepath.Join(t.TempDir(), "checks.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	seed := &store.Exchange{Method: "GET", Scheme: "http", Host: strings.TrimPrefix(server.URL, "http://"), Path: "/", Status: 200, InScope: true, StartedAt: time.Now()}
+	if err := s.SaveExchange(context.Background(), seed); err != nil {
+		t.Fatal(err)
+	}
+	crawlID, err := s.CreateCrawlRun(context.Background(), seed.ID, 1, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.AppendCrawlPage(context.Background(), crawlID, store.CrawlPage{URL: server.URL + "/go?next=original-secret", QueryNames: []string{"next"}, Status: 200}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.FinishCrawlRun(context.Background(), crawlID, "completed", ""); err != nil {
+		t.Fatal(err)
+	}
+	service, err := New(s, s, s, testScope{server.URL}, repeater.NewHTTPSender(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	report, err := service.Start(context.Background(), Request{CrawlID: crawlID, Acknowledge: true, CheckRedirects: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.MaximumRequests != 2 {
+		t.Fatalf("maximum requests = %d", report.MaximumRequests)
+	}
+	deadline := time.After(5 * time.Second)
+	for {
+		run, err := s.GetActiveCheckRun(context.Background(), report.RunID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if run.State != "running" {
+			if run.State != "completed" || len(run.Observations) != 2 || run.Observations[1].Source != "redirect_query" || !run.Observations[1].Found || run.Observations[1].Context != "redirect_location" {
+				t.Fatalf("run=%+v", run)
+			}
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("redirect check timed out")
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+	if requests.Load() != 2 {
+		t.Fatalf("requests = %d", requests.Load())
+	}
+}
+
 func TestServiceStopsWhenScopeRevoked(t *testing.T) {
 	var requests atomic.Int32
 	scope := &revocableScope{}

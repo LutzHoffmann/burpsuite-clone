@@ -21,3 +21,14 @@ func TestActiveCheckHTMLIsSelfContainedAndEscaped(t *testing.T) {
 		t.Fatalf("missing report context: %s", html)
 	}
 }
+
+func TestActiveCheckHTMLLabelsRedirectObservations(t *testing.T) {
+	run := store.ActiveCheckRun{ID: 10, CrawlID: 4, State: "completed", Observations: []store.ActiveCheckObservation{{URL: "https://example.test/go", Source: "redirect_query", Parameter: "next", Status: 302, Found: true, Context: "redirect_location"}}}
+	output, err := ActiveCheckHTML(run)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(output), "External redirect observed") || strings.Contains(string(output), "Exact marker reflected in redirect_location") {
+		t.Fatalf("redirect report mislabeled: %s", output)
+	}
+}

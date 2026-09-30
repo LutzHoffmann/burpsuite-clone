@@ -23,6 +23,26 @@ var migrations = []migration{
 	{version: 10, apply: applyCrawlSchema},
 	{version: 11, apply: applyCrawlQueryNamesSchema},
 	{version: 12, apply: applyActiveCheckSchema},
+	{version: 13, apply: applyRedirectCheckSchema},
+}
+
+func applyRedirectCheckSchema(tx *sql.Tx) error {
+	_, err := tx.Exec(`CREATE TABLE active_check_observations_next (
+ run_id INTEGER NOT NULL REFERENCES active_check_runs(id) ON DELETE CASCADE,
+ url TEXT NOT NULL CHECK(length(CAST(url AS BLOB)) BETWEEN 1 AND 4096),
+ source TEXT NOT NULL CHECK(source IN ('query','get_form','redirect_query','redirect_get_form')),
+ parameter TEXT NOT NULL CHECK(length(CAST(parameter AS BLOB)) BETWEEN 1 AND 256),
+ status INTEGER NOT NULL CHECK(status BETWEEN 0 AND 999),
+ found INTEGER NOT NULL CHECK(found IN (0,1)),
+ context TEXT NOT NULL CHECK(context IN ('unknown','plain_text','html_text','html_attribute','raw_text','redirect_location')),
+ partial INTEGER NOT NULL CHECK(partial IN (0,1)),
+ error TEXT NOT NULL CHECK(length(CAST(error AS BLOB)) <= 64),
+ PRIMARY KEY(run_id,url,source,parameter)
+);
+INSERT INTO active_check_observations_next SELECT * FROM active_check_observations;
+DROP TABLE active_check_observations;
+ALTER TABLE active_check_observations_next RENAME TO active_check_observations;`)
+	return err
 }
 
 func applyActiveCheckSchema(tx *sql.Tx) error {

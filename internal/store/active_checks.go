@@ -71,11 +71,11 @@ func (s *SQLiteStore) CreateActiveCheckRun(ctx context.Context, crawlID int64) (
 	return id, tx.Commit()
 }
 func (s *SQLiteStore) AppendActiveCheck(ctx context.Context, id int64, item ActiveCheckObservation) error {
-	if len(item.URL) < 1 || len(item.URL) > 4096 || (item.Source != "query" && item.Source != "get_form") || len(item.Parameter) < 1 || len(item.Parameter) > 256 || item.Status < 0 || item.Status > 999 || len(item.Error) > 64 {
+	if len(item.URL) < 1 || len(item.URL) > 4096 || (item.Source != "query" && item.Source != "get_form" && item.Source != "redirect_query" && item.Source != "redirect_get_form") || len(item.Parameter) < 1 || len(item.Parameter) > 256 || item.Status < 0 || item.Status > 999 || len(item.Error) > 64 {
 		return fmt.Errorf("invalid active check observation")
 	}
 	switch item.Context {
-	case "unknown", "plain_text", "html_text", "html_attribute", "raw_text":
+	case "unknown", "plain_text", "html_text", "html_attribute", "raw_text", "redirect_location":
 	default:
 		return fmt.Errorf("invalid active check context")
 	}

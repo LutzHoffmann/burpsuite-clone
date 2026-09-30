@@ -25,7 +25,26 @@ it('requires confirmation and labels reflection as an observation', async () => 
   expect(await screen.findByText(/Crawl #3 · completed/)).toBeInTheDocument();
   expect(screen.getByText(/observation, not confirmed XSS/)).toBeInTheDocument();
   expect(screen.getByRole('link', { name: 'Download HTML report' })).toHaveAttribute('href', '/api/active-checks/runs/4/report.html');
-  expect(bodies).toEqual([{ crawlId: 3, acknowledge: true, session: { cookie: 'sid=explicit', authorization: '' } }]);
+  expect(bodies).toEqual([{ crawlId: 3, acknowledge: true, checkRedirects: false, session: { cookie: 'sid=explicit', authorization: '' } }]);
+  vi.unstubAllGlobals();
+});
+
+it('opts into redirect checks and labels results separately', async () => {
+  const bodies: unknown[] = [];
+  vi.stubGlobal('confirm', vi.fn(() => true));
+  vi.stubGlobal('fetch', vi.fn(async (path: RequestInfo | URL, init?: RequestInit) => {
+    if (String(path) === '/api/crawl/runs') return new Response('[{"id":3,"state":"completed","pageCount":1}]');
+    if (String(path) === '/api/active-checks/runs' && !init?.method) return new Response('[]');
+    if (String(path) === '/api/active-checks/runs' && init?.method === 'POST') { bodies.push(JSON.parse(String(init.body))); return new Response('{"runId":5,"state":"running","maximumRequests":2}', { status: 202 }); }
+    if (String(path) === '/api/active-checks/runs/5') return new Response('{"id":5,"crawlId":3,"state":"completed","observationCount":1,"observations":[{"url":"https://example.test/go","source":"redirect_query","parameter":"next","status":302,"found":true,"context":"redirect_location","partial":false}]}');
+    throw new Error(String(path));
+  }));
+  render(<ActiveChecksWorkspace />);
+  await userEvent.selectOptions(await screen.findByLabelText('Crawl run'), '3');
+  await userEvent.click(screen.getByLabelText('Check open redirects'));
+  await userEvent.click(screen.getByRole('button', { name: 'Start active checks' }));
+  expect(await screen.findByText(/external redirect observed/)).toBeInTheDocument();
+  expect(bodies).toEqual([{ crawlId: 3, acknowledge: true, checkRedirects: true, session: { cookie: '', authorization: '' } }]);
   vi.unstubAllGlobals();
 });
 

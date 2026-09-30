@@ -60,7 +60,8 @@ session-expiry detection.
 ## Active checks from a crawl
 
 After a crawl completes, refresh the crawl list under Active checks and select
-that run. Starting checks requires a separate authorization confirmation. The
+that run. Optionally select **Check open redirects**. Starting checks requires
+a separate authorization confirmation. The
 service tests up to 25 discovered same-origin query or GET-form targets, up to
 five parameter names per target, and at most 100 requests total. Hidden,
 password, and file fields are skipped. Each GET request marks one parameter and
@@ -68,11 +69,18 @@ keeps other query names with empty values; it never replays captured values,
 captured cookies, captured authorization headers, or POST
 forms. Scope is rechecked before every request; requests are sequential, at
 least 500 ms apart, and capped at five seconds and 64 KiB each. The whole run
-has a 60-second limit. Redirects and environment proxies are not used.
+has a 60-second limit. Redirects are not followed and environment proxies are not used.
 
-The result records whether an exact random marker appeared in the response
-body and, if recognizable, its HTML context. It is an observation, **not** a
-confirmed XSS or injection vulnerability. Truncated and ambiguous responses
+When enabled, the redirect check sends a second synthetic value for each
+selected parameter, within the same 100-request cap. It uses a unique
+`https://redirect-check.invalid/` URL as the value and records an observation
+only when a 3xx response contains that exact absolute URL in `Location`.
+The client never requests that URL. This can indicate an open redirect but
+does not establish exploitability. The option is off by default.
+
+Reflection results record whether an exact random marker appeared in the response
+body and, if recognizable, its HTML context. These are observations, **not**
+confirmed XSS or injection vulnerabilities. Truncated and ambiguous responses
 are marked conservatively. No response body, marker value, original query
 value, or form value is stored. Runs can be cancelled, reopened, and deleted;
 restart marks unfinished runs interrupted. Automatic login, POST forms,

@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"errors"
+	"net/http"
 	"net/url"
 	"strings"
 	"sync"
@@ -30,9 +31,10 @@ type CrawlReader interface {
 }
 type Scope interface{ Allows(string) bool }
 type Request struct {
-	CrawlID     int64                 `json:"crawlId"`
-	Acknowledge bool                  `json:"acknowledge"`
-	Session     scancreds.Credentials `json:"session"`
+	CrawlID        int64                 `json:"crawlId"`
+	Acknowledge    bool                  `json:"acknowledge"`
+	CheckRedirects bool                  `json:"checkRedirects"`
+	Session        scancreds.Credentials `json:"session"`
 }
 type Report struct {
 	RunID           int64  `json:"runId"`
@@ -167,10 +169,13 @@ func (s *Service) Start(ctx context.Context, input Request) (Report, error) {
 	for _, item := range candidates {
 		maximum += len(item.names)
 	}
+	if input.CheckRedirects {
+		maximum *= 2
+	}
 	if maximum > 100 {
 		maximum = 100
 	}
-	go s.run(runCtx, id, candidates, input.Session)
+	go s.run(runCtx, id, candidates, input.Session, input.CheckRedirects)
 	return Report{RunID: id, State: "running", MaximumRequests: maximum}, nil
 }
 func (s *Service) Cancel(id int64) error {
@@ -182,7 +187,7 @@ func (s *Service) Cancel(id int64) error {
 	s.cancel()
 	return nil
 }
-func (s *Service) run(ctx context.Context, id int64, candidates []candidate, session scancreds.Credentials) {
+func (s *Service) run(ctx context.Context, id int64, candidates []candidate, session scancreds.Credentials, checkRedirects bool) {
 	state, reason := "completed", ""
 	defer func() {
 		persistCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -198,74 +203,93 @@ func (s *Service) run(ctx context.Context, id int64, candidates []candidate, ses
 	sent := 0
 	for _, item := range candidates {
 		for _, name := range item.names {
-			if sent >= 100 {
-				return
+			checks := []string{"reflection"}
+			if checkRedirects {
+				checks = append(checks, "redirect")
 			}
-			if delay := time.Until(lastSend.Add(500 * time.Millisecond)); delay > 0 {
-				timer := time.NewTimer(delay)
-				select {
-				case <-ctx.Done():
-					timer.Stop()
-					state = "cancelled"
-					reason = "cancelled"
+			for _, check := range checks {
+				if sent >= 100 {
 					return
-				case <-timer.C:
 				}
-			}
-			if ctx.Err() != nil {
-				state = "cancelled"
-				reason = "cancelled"
-				return
-			}
-			markerBytes := make([]byte, 12)
-			if _, err := rand.Read(markerBytes); err != nil {
-				state = "failed"
-				reason = "marker_failed"
-				return
-			}
-			marker := "scan-" + hex.EncodeToString(markerBytes)
-			target, err := probeTarget(item.url, name, marker)
-			if err != nil {
-				state = "failed"
-				reason = "invalid_target"
-				return
-			}
-			if len(target) > 4096 {
-				state = "failed"
-				reason = "target_too_long"
-				return
-			}
-			if !s.scope.Allows(target) {
-				state = "scope_revoked"
-				reason = "scope_revoked"
-				return
-			}
-			lastSend = time.Now()
-			result, sendErr := s.sender.Send(ctx, repeater.SendRequest{Method: "GET", URL: target, Headers: session.Headers("BurpSuiteClone-ActiveChecks/1")}, repeater.SendOptions{Timeout: 5 * time.Second, BodyLimitBytes: 64 << 10})
-			observation := store.ActiveCheckObservation{URL: item.url, Source: item.source, Parameter: name, Context: "unknown"}
-			if sendErr != nil {
+				if delay := time.Until(lastSend.Add(500 * time.Millisecond)); delay > 0 {
+					timer := time.NewTimer(delay)
+					select {
+					case <-ctx.Done():
+						timer.Stop()
+						state = "cancelled"
+						reason = "cancelled"
+						return
+					case <-timer.C:
+					}
+				}
 				if ctx.Err() != nil {
 					state = "cancelled"
 					reason = "cancelled"
 					return
 				}
-				observation.Error = "request_failed"
-			} else {
-				classified := Classify(result.Body, result.ContentType, marker, result.Truncated)
-				observation.Status = result.Status
-				observation.Found = classified.Found
-				observation.Context = classified.Context
-				observation.Partial = classified.Partial
+				markerBytes := make([]byte, 12)
+				if _, err := rand.Read(markerBytes); err != nil {
+					state = "failed"
+					reason = "marker_failed"
+					return
+				}
+				marker := "scan-" + hex.EncodeToString(markerBytes)
+				if check == "redirect" {
+					marker = "https://redirect-check.invalid/" + hex.EncodeToString(markerBytes)
+				}
+				target, err := probeTarget(item.url, name, marker)
+				if err != nil {
+					state = "failed"
+					reason = "invalid_target"
+					return
+				}
+				if len(target) > 4096 {
+					state = "failed"
+					reason = "target_too_long"
+					return
+				}
+				if !s.scope.Allows(target) {
+					state = "scope_revoked"
+					reason = "scope_revoked"
+					return
+				}
+				lastSend = time.Now()
+				result, sendErr := s.sender.Send(ctx, repeater.SendRequest{Method: "GET", URL: target, Headers: session.Headers("BurpSuiteClone-ActiveChecks/1")}, repeater.SendOptions{Timeout: 5 * time.Second, BodyLimitBytes: 64 << 10})
+				observation := store.ActiveCheckObservation{URL: item.url, Source: item.source, Parameter: name, Context: "unknown"}
+				if check == "redirect" {
+					observation.Source = "redirect_" + item.source
+				}
+				if sendErr != nil {
+					if ctx.Err() != nil {
+						state = "cancelled"
+						reason = "cancelled"
+						return
+					}
+					observation.Error = "request_failed"
+				} else {
+					observation.Status = result.Status
+					if check == "redirect" {
+						observation.Found = result.Status >= 300 && result.Status < 400 && http.Header(result.Headers).Get("Location") == marker
+						if observation.Found {
+							observation.Context = "redirect_location"
+						}
+					} else {
+						classified := Classify(result.Body, result.ContentType, marker, result.Truncated)
+						observation.Found = classified.Found
+						observation.Context = classified.Context
+						observation.Partial = classified.Partial
+					}
+				}
+				persistCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+				err = s.repository.AppendActiveCheck(persistCtx, id, observation)
+				cancel()
+				if err != nil {
+					state = "failed"
+					reason = "storage_failed"
+					return
+				}
+				sent++
 			}
-			persistCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-			err = s.repository.AppendActiveCheck(persistCtx, id, observation)
-			cancel()
-			if err != nil {
-				state = "failed"
-				reason = "storage_failed"
-				return
-			}
-			sent++
 		}
 	}
 }
