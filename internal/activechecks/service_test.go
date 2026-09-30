@@ -106,6 +106,10 @@ func TestServiceOptionalRedirectCheckDoesNotFollowLocation(t *testing.T) {
 			w.Header().Set("Location", next)
 			w.WriteHeader(http.StatusFound)
 		}
+		if origin := r.Header.Get("Origin"); strings.HasSuffix(origin, ".cors-check.invalid") {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+			w.Header().Set("Access-Control-Allow-Credentials", "true")
+		}
 	}))
 	defer server.Close()
 	s, err := store.OpenSQLite(filepath.Join(t.TempDir(), "checks.db"))
@@ -117,11 +121,14 @@ func TestServiceOptionalRedirectCheckDoesNotFollowLocation(t *testing.T) {
 	if err := s.SaveExchange(context.Background(), seed); err != nil {
 		t.Fatal(err)
 	}
-	crawlID, err := s.CreateCrawlRun(context.Background(), seed.ID, 1, 0)
+	crawlID, err := s.CreateCrawlRun(context.Background(), seed.ID, 2, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := s.AppendCrawlPage(context.Background(), crawlID, store.CrawlPage{URL: server.URL + "/go?next=original-secret", QueryNames: []string{"next"}, Status: 200}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.AppendCrawlPage(context.Background(), crawlID, store.CrawlPage{URL: server.URL + "/go?next=another-secret", QueryNames: []string{"next"}, Status: 200}, nil); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.FinishCrawlRun(context.Background(), crawlID, "completed", ""); err != nil {
@@ -131,11 +138,11 @@ func TestServiceOptionalRedirectCheckDoesNotFollowLocation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	report, err := service.Start(context.Background(), Request{CrawlID: crawlID, Acknowledge: true, CheckRedirects: true})
+	report, err := service.Start(context.Background(), Request{CrawlID: crawlID, Acknowledge: true, CheckRedirects: true, CheckCORS: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if report.MaximumRequests != 2 {
+	if report.MaximumRequests != 3 {
 		t.Fatalf("maximum requests = %d", report.MaximumRequests)
 	}
 	deadline := time.After(5 * time.Second)
@@ -145,7 +152,7 @@ func TestServiceOptionalRedirectCheckDoesNotFollowLocation(t *testing.T) {
 			t.Fatal(err)
 		}
 		if run.State != "running" {
-			if run.State != "completed" || len(run.Observations) != 2 || run.Observations[1].Source != "redirect_query" || !run.Observations[1].Found || run.Observations[1].Context != "redirect_location" {
+			if run.State != "completed" || len(run.Observations) != 3 || run.Observations[1].Source != "redirect_query" || !run.Observations[1].Found || run.Observations[1].Context != "redirect_location" || run.Observations[2].Source != "cors" || !run.Observations[2].Found || run.Observations[2].Context != "cors_credentials" {
 				t.Fatalf("run=%+v", run)
 			}
 			break
@@ -156,7 +163,7 @@ func TestServiceOptionalRedirectCheckDoesNotFollowLocation(t *testing.T) {
 		case <-time.After(20 * time.Millisecond):
 		}
 	}
-	if requests.Load() != 2 {
+	if requests.Load() != 3 {
 		t.Fatalf("requests = %d", requests.Load())
 	}
 }

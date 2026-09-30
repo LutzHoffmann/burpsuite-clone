@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-func TestRedirectCheckMigrationPreservesObservations(t *testing.T) {
+func TestActiveCheckMigrationsPreserveObservations(t *testing.T) {
 	db, err := sql.Open("sqlite", ":memory:")
 	if err != nil {
 		t.Fatal(err)
@@ -41,6 +41,23 @@ INSERT INTO active_check_observations VALUES (1,'https://example.test/','query',
 		t.Fatalf("original context=%q, err=%v", original, err)
 	}
 	if _, err := db.Exec(`INSERT INTO active_check_observations VALUES (1,'https://example.test/','redirect_query','next',302,1,'redirect_location',0,'')`); err != nil {
+		t.Fatal(err)
+	}
+	tx, err = db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := applyCORSCheckSchema(tx); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM active_check_observations`).Scan(&count); err != nil || count != 2 {
+		t.Fatalf("preserved observations=%d, err=%v", count, err)
+	}
+	if _, err := db.Exec(`INSERT INTO active_check_observations VALUES (1,'https://example.test/','cors','Origin',200,1,'cors_credentials',0,'')`); err != nil {
 		t.Fatal(err)
 	}
 }

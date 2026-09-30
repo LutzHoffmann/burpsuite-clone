@@ -60,7 +60,7 @@ session-expiry detection.
 ## Active checks from a crawl
 
 After a crawl completes, refresh the crawl list under Active checks and select
-that run. Optionally select **Check open redirects**. Starting checks requires
+that run. Optionally select **Check open redirects** or **Check credentialed CORS**. Starting checks requires
 a separate authorization confirmation. The
 service tests up to 25 discovered same-origin query or GET-form targets, up to
 five parameter names per target, and at most 100 requests total. Hidden,
@@ -77,6 +77,14 @@ selected parameter, within the same 100-request cap. It uses a unique
 only when a 3xx response contains that exact absolute URL in `Location`.
 The client never requests that URL. This can indicate an open redirect but
 does not establish exploitability. The option is off by default.
+
+When enabled, the CORS check sends one additional GET per selected target,
+within the same 100-request cap. Original query values are cleared. A random
+`https://<nonce>.cors-check.invalid` Origin header is sent to the in-scope
+target; that hostname is never requested. An observation is recorded only
+when the response contains that exact Origin in `Access-Control-Allow-Origin`
+and `Access-Control-Allow-Credentials: true`. This is not proof that sensitive
+data can be read by an attacker. The option is off by default.
 
 Reflection results record whether an exact random marker appeared in the response
 body and, if recognizable, its HTML context. These are observations, **not**

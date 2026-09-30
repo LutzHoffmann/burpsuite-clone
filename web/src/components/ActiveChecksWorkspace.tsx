@@ -13,6 +13,7 @@ export function ActiveChecksWorkspace() {
   const [cookie, setCookie] = useState('');
   const [authorization, setAuthorization] = useState('');
   const [checkRedirects, setCheckRedirects] = useState(false);
+  const [checkCors, setCheckCors] = useState(false);
   const [error, setError] = useState('');
   const load = async (signal?: AbortSignal) => {
     const [crawlResponse, checkResponse] = await Promise.all([
@@ -45,10 +46,10 @@ export function ActiveChecksWorkspace() {
   }, [selected]);
   const start = async () => {
     if (!crawlId || starting) return;
-    if (!window.confirm(`Run up to 100 synthetic GET checks from crawl #${crawlId}? ${checkRedirects ? 'Include external redirect observations; redirect responses will not be followed. ' : ''}${cookie || authorization ? 'The session headers you entered will be sent to the crawl origin. ' : ''}Only test systems you are authorized to assess. Observations are not confirmed vulnerabilities.`)) return;
+    if (!window.confirm(`Run up to 100 synthetic GET checks from crawl #${crawlId}? ${checkRedirects ? 'Include external redirect observations; redirect responses will not be followed. ' : ''}${checkCors ? 'Include credentialed CORS origin observations. ' : ''}${cookie || authorization ? 'The session headers you entered will be sent to the crawl origin. ' : ''}Only test systems you are authorized to assess. Observations are not confirmed vulnerabilities.`)) return;
     setStarting(true); setError('');
     try {
-      const response = await fetch('/api/active-checks/runs', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ crawlId, acknowledge: true, checkRedirects, session: { cookie, authorization } }), cache: 'no-store' });
+      const response = await fetch('/api/active-checks/runs', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ crawlId, acknowledge: true, checkRedirects, checkCors, session: { cookie, authorization } }), cache: 'no-store' });
       if (!response.ok) throw new Error(`Checks rejected (${response.status}): ${(await response.text()).trim()}`);
       setCookie(''); setAuthorization('');
       const report = await response.json() as { runId: number };
@@ -74,13 +75,14 @@ export function ActiveChecksWorkspace() {
     } catch (cause) { setError(String(cause)); }
   };
   return <section className="scanner-history" aria-label="Active checks">
-    <h2>Active checks</h2><p>Synthetic GET reflection checks on discovered inputs, with optional redirect observations. These are not confirmed vulnerabilities.</p>
+    <h2>Active checks</h2><p>Synthetic GET reflection checks on discovered inputs, with optional redirect and CORS observations. These are not confirmed vulnerabilities.</p>
     <div className="scanner-controls"><label>Crawl run<select value={crawlId} onChange={(event) => setCrawlId(Number(event.target.value))}><option value={0}>Select completed crawl</option>{crawls.filter((run) => run.state === 'completed').map((run) => <option key={run.id} value={run.id}>Crawl #{run.id} · {run.pageCount} pages</option>)}</select></label><button type="button" className="quiet-button" onClick={() => void load().catch((cause) => setError(String(cause)))}>Refresh crawls</button><button type="button" className="quiet-button" disabled={!crawlId || starting} onClick={() => void start()}>{starting ? 'Starting...' : 'Start active checks'}</button>{selected?.state === 'running' && <button type="button" className="quiet-button" onClick={() => void cancel()}>Cancel active checks</button>}</div>
     <div className="scanner-controls"><label>Session cookie<input type="password" autoComplete="off" value={cookie} onChange={(event) => setCookie(event.target.value)} maxLength={4096} /></label><label>Authorization header<input type="password" autoComplete="off" value={authorization} onChange={(event) => setAuthorization(event.target.value)} maxLength={4096} /></label></div>
     <label><input type="checkbox" checked={checkRedirects} onChange={(event) => setCheckRedirects(event.target.checked)} /> Check open redirects</label>
-    <p className="scanner-notice">At most 100 requests, two per second, same origin and current scope. Redirect checks use an inert external-looking value; responses are not followed. Original query values are not sent. Optional explicit session headers are used for this run only and never saved in results.</p>
+    <label><input type="checkbox" checked={checkCors} onChange={(event) => setCheckCors(event.target.checked)} /> Check credentialed CORS</label>
+    <p className="scanner-notice">At most 100 requests, two per second, same origin and current scope. Redirect checks use an inert external-looking value; responses are not followed. CORS checks send a random Origin header. Original query values are not sent. Optional explicit session headers are used for this run only and never saved in results.</p>
     {error && <p className="api-error" role="alert">{error}</p>}
-    {selected && <div className="scanner-report"><h2>Active checks #{selected.id} · Crawl #{selected.crawlId} · {selected.state} · {selected.observationCount} observations</h2>{selected.state !== 'running' && <p><a href={`/api/active-checks/runs/${selected.id}/report.html`} download={`active-checks-${selected.id}.html`}>Download HTML report</a></p>}{selected.reason && <p>{selected.reason}</p>}{selected.observations?.map((item) => <article key={`${item.source}-${item.url}-${item.parameter}`}><strong>{item.source}: {item.parameter} · {item.url}</strong><span>{item.error || (item.source.startsWith('redirect_') ? `HTTP ${item.status} · ${item.found ? 'external redirect observed, not confirmed vulnerability' : 'no exact external redirect observed'}` : `HTTP ${item.status} · ${item.found ? `${item.context} reflection observation, not confirmed XSS` : 'no exact reflection observed'}${item.partial ? ' · partial response' : ''}`)}</span></article>)}</div>}
+    {selected && <div className="scanner-report"><h2>Active checks #{selected.id} · Crawl #{selected.crawlId} · {selected.state} · {selected.observationCount} observations</h2>{selected.state !== 'running' && <p><a href={`/api/active-checks/runs/${selected.id}/report.html`} download={`active-checks-${selected.id}.html`}>Download HTML report</a></p>}{selected.reason && <p>{selected.reason}</p>}{selected.observations?.map((item) => <article key={`${item.source}-${item.url}-${item.parameter}`}><strong>{item.source}: {item.parameter} · {item.url}</strong><span>{item.error || (item.source.startsWith('redirect_') ? `HTTP ${item.status} · ${item.found ? 'external redirect observed, not confirmed vulnerability' : 'no exact external redirect observed'}` : item.source === 'cors' ? `HTTP ${item.status} · ${item.found ? 'credentialed CORS origin reflection observed, not confirmed vulnerability' : 'no credentialed CORS origin reflection observed'}` : `HTTP ${item.status} · ${item.found ? `${item.context} reflection observation, not confirmed XSS` : 'no exact reflection observed'}${item.partial ? ' · partial response' : ''}`)}</span></article>)}</div>}
     <h3>Saved active checks</h3>{runs.map((run) => <div className="scanner-history-row" key={run.id}><button type="button" className="quiet-button" onClick={() => void openRun(run.id).catch((cause) => setError(String(cause)))}>Open active checks #{run.id}</button><span>{run.state} · {run.observationCount} observations</span><button type="button" className="quiet-button" disabled={run.state === 'running'} onClick={() => void remove(run.id)}>Delete active checks #{run.id}</button></div>)}
   </section>;
 }

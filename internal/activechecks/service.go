@@ -34,6 +34,7 @@ type Request struct {
 	CrawlID        int64                 `json:"crawlId"`
 	Acknowledge    bool                  `json:"acknowledge"`
 	CheckRedirects bool                  `json:"checkRedirects"`
+	CheckCORS      bool                  `json:"checkCors"`
 	Session        scancreds.Credentials `json:"session"`
 }
 type Report struct {
@@ -61,6 +62,20 @@ func probeTarget(raw, name, marker string) (string, error) {
 	return target.String(), nil
 }
 
+func clearedTarget(raw string) (string, error) {
+	target, err := url.Parse(raw)
+	if err != nil {
+		return "", err
+	}
+	query := target.Query()
+	for key, values := range query {
+		query[key] = make([]string, len(values))
+	}
+	target.RawQuery = query.Encode()
+	target.Fragment = ""
+	return target.String(), nil
+}
+
 type Service struct {
 	history    History
 	crawls     CrawlReader
@@ -82,6 +97,16 @@ func sameOrigin(raw string, seed *url.URL) bool {
 	u, err := url.Parse(raw)
 	return err == nil && u.Scheme == seed.Scheme && strings.EqualFold(u.Host, seed.Host) && u.User == nil
 }
+func observationKey(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return ""
+	}
+	u.RawQuery = ""
+	u.ForceQuery = false
+	u.Fragment = ""
+	return u.String()
+}
 func chooseCandidates(run store.CrawlRun, seed *url.URL, scope Scope) []candidate {
 	chosen := []candidate{}
 	seen := map[string]bool{}
@@ -97,7 +122,7 @@ func chooseCandidates(run store.CrawlRun, seed *url.URL, scope Scope) []candidat
 			if name == "" || len(name) > 256 {
 				continue
 			}
-			key := source + "\x00" + raw + "\x00" + name
+			key := source + "\x00" + observationKey(raw) + "\x00" + name
 			if seen[key] {
 				continue
 			}
@@ -172,10 +197,17 @@ func (s *Service) Start(ctx context.Context, input Request) (Report, error) {
 	if input.CheckRedirects {
 		maximum *= 2
 	}
+	if input.CheckCORS {
+		seenCORS := map[string]bool{}
+		for _, item := range candidates {
+			seenCORS[observationKey(item.url)] = true
+		}
+		maximum += len(seenCORS)
+	}
 	if maximum > 100 {
 		maximum = 100
 	}
-	go s.run(runCtx, id, candidates, input.Session, input.CheckRedirects)
+	go s.run(runCtx, id, candidates, input.Session, input.CheckRedirects, input.CheckCORS)
 	return Report{RunID: id, State: "running", MaximumRequests: maximum}, nil
 }
 func (s *Service) Cancel(id int64) error {
@@ -187,7 +219,7 @@ func (s *Service) Cancel(id int64) error {
 	s.cancel()
 	return nil
 }
-func (s *Service) run(ctx context.Context, id int64, candidates []candidate, session scancreds.Credentials, checkRedirects bool) {
+func (s *Service) run(ctx context.Context, id int64, candidates []candidate, session scancreds.Credentials, checkRedirects, checkCORS bool) {
 	state, reason := "completed", ""
 	defer func() {
 		persistCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -201,6 +233,7 @@ func (s *Service) run(ctx context.Context, id int64, candidates []candidate, ses
 	}()
 	lastSend := time.Time{}
 	sent := 0
+	seenCORS := map[string]bool{}
 	for _, item := range candidates {
 		for _, name := range item.names {
 			checks := []string{"reflection"}
@@ -291,5 +324,65 @@ func (s *Service) run(ctx context.Context, id int64, candidates []candidate, ses
 				sent++
 			}
 		}
+		key := observationKey(item.url)
+		if !checkCORS || sent >= 100 || seenCORS[key] {
+			continue
+		}
+		seenCORS[key] = true
+		if delay := time.Until(lastSend.Add(500 * time.Millisecond)); delay > 0 {
+			timer := time.NewTimer(delay)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				state, reason = "cancelled", "cancelled"
+				return
+			case <-timer.C:
+			}
+		}
+		if ctx.Err() != nil {
+			state, reason = "cancelled", "cancelled"
+			return
+		}
+		markerBytes := make([]byte, 12)
+		if _, err := rand.Read(markerBytes); err != nil {
+			state, reason = "failed", "marker_failed"
+			return
+		}
+		origin := "https://" + hex.EncodeToString(markerBytes) + ".cors-check.invalid"
+		target, err := clearedTarget(item.url)
+		if err != nil || len(target) > 4096 {
+			state, reason = "failed", "invalid_target"
+			return
+		}
+		if !s.scope.Allows(target) {
+			state, reason = "scope_revoked", "scope_revoked"
+			return
+		}
+		headers := session.Headers("BurpSuiteClone-ActiveChecks/1")
+		headers["Origin"] = []string{origin}
+		lastSend = time.Now()
+		result, sendErr := s.sender.Send(ctx, repeater.SendRequest{Method: "GET", URL: target, Headers: headers}, repeater.SendOptions{Timeout: 5 * time.Second, BodyLimitBytes: 64 << 10})
+		observation := store.ActiveCheckObservation{URL: item.url, Source: "cors", Parameter: "Origin", Context: "unknown"}
+		if sendErr != nil {
+			if ctx.Err() != nil {
+				state, reason = "cancelled", "cancelled"
+				return
+			}
+			observation.Error = "request_failed"
+		} else {
+			observation.Status = result.Status
+			observation.Found = credentialedCORS(http.Header(result.Headers), origin)
+			if observation.Found {
+				observation.Context = "cors_credentials"
+			}
+		}
+		persistCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		err = s.repository.AppendActiveCheck(persistCtx, id, observation)
+		cancel()
+		if err != nil {
+			state, reason = "failed", "storage_failed"
+			return
+		}
+		sent++
 	}
 }

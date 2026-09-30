@@ -32,3 +32,14 @@ func TestActiveCheckHTMLLabelsRedirectObservations(t *testing.T) {
 		t.Fatalf("redirect report mislabeled: %s", output)
 	}
 }
+
+func TestActiveCheckHTMLLabelsCORSObservations(t *testing.T) {
+	run := store.ActiveCheckRun{ID: 11, CrawlID: 5, State: "completed", Observations: []store.ActiveCheckObservation{{URL: "https://example.test/api", Source: "cors", Parameter: "Origin", Status: 200, Found: true, Context: "cors_credentials"}}}
+	output, err := ActiveCheckHTML(run)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(output), "Credentialed CORS origin reflection observed") || strings.Contains(string(output), "Exact marker reflected in cors_credentials") {
+		t.Fatalf("CORS report mislabeled: %s", output)
+	}
+}

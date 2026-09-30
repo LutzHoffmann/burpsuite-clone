@@ -47,7 +47,7 @@ vulnerability report. The separate bounded crawler discovers same-origin pages
 and form metadata without submitting forms or launching probes. GET endpoints
 may still have side effects; test only targets you are authorized to assess.
 Completed crawls can be used for separately confirmed, bounded active GET
-reflection checks and optional open-redirect observations. Their context labels
+reflection checks and optional open-redirect/CORS observations. Their context labels
 are observations, not confirmed vulnerabilities.
 Both crawler and active GET checks accept optional, explicitly entered session
 headers for one run; they do not save credentials or perform automatic login.
