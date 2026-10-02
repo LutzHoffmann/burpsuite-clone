@@ -21,7 +21,8 @@ the browser without saving or sending tool input. See
 
 Repeater can generate a manual CSRF proof-of-concept HTML form from GET or
 form-urlencoded POST drafts. The form never auto-submits; custom headers and
-cookies cannot be represented. See [CSRF PoC limits](docs/setup/csrf-poc.md)
+cookies cannot be represented. Repeater supports up to 20 independent tabs;
+drafts and responses survive workspace switches but not page reloads. See [CSRF PoC limits](docs/setup/csrf-poc.md)
 and the [feature status](docs/feature-status.md) for remaining Burp-like gaps.
 
 API Import accepts local OpenAPI 3.0/3.1 JSON, lists supported endpoint methods,

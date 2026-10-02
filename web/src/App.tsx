@@ -28,7 +28,7 @@ import { IntruderWorkspace } from './components/IntruderWorkspace';
 import { FindingsWorkspace } from './components/FindingsWorkspace';
 import { ActiveScannerWorkspace } from './components/ActiveScannerWorkspace';
 import { Inspector } from './components/Inspector';
-import { Repeater } from './components/Repeater';
+import { RepeaterWorkspace } from './components/RepeaterWorkspace';
 import { Settings } from './components/Settings';
 import { StatusBar } from './components/StatusBar';
 import { TargetWorkspace } from './components/TargetWorkspace';
@@ -36,7 +36,9 @@ import { WebSocketsWorkspace } from './components/WebSocketsWorkspace';
 import { Workbench } from './components/Workbench';
 import { ApiWorkspace } from './components/ApiWorkspace';
 import type { ApiWorkspaceState } from './components/ApiWorkspace';
-import type { Exchange, HistoryItem, InterceptConfig, InterceptItem, ScopeRule, SendRequest, SendResult, StatusDTO, TargetRefresh } from './types';
+import { newRepeaterTab } from './tools/repeaterTabs';
+import type { RepeaterDraft } from './tools/repeaterTabs';
+import type { Exchange, HistoryItem, InterceptConfig, InterceptItem, ScopeRule, SendRequest, StatusDTO, TargetRefresh } from './types';
 
 const fallbackStatus: StatusDTO = {
   apiAddr: '127.0.0.1:9080',
@@ -152,9 +154,13 @@ export function App() {
   const configRef = useRef(interceptConfig);
   const configPending = useRef(false);
   const configRevision = useRef(0);
-  const [repeaterRequest, setRepeaterRequest] = useState<SendRequest>(emptyRepeaterRequest);
+  const [repeaterTabs, setRepeaterTabs] = useState([newRepeaterTab(1, emptyRepeaterRequest)]);
+  const repeaterTabCount = useRef(1);
+  const [activeRepeaterId, setActiveRepeaterId] = useState(1);
+  const nextRepeaterId = useRef(2);
+  const nextRepeaterSendId = useRef(1);
+  const repeaterHandoffRevision = useRef(0);
   const [apiImport, setAPIImport] = useState<ApiWorkspaceState>({ raw: '', baseUrl: '', inventory: null });
-  const [repeaterResult, setRepeaterResult] = useState<SendResult | null>(null);
   const [intruderSource, setIntruderSource] = useState<IntruderSource | null>(null);
   const intruderHandoffRevision = useRef(0);
   const [apiErrors, setAPIErrors] = useState<Record<string, string | undefined>>({});
@@ -327,18 +333,31 @@ export function App() {
     }
   };
 
+  const openRepeaterDraft = (request: SendRequest) => {
+    repeaterHandoffRevision.current += 1;
+    if (repeaterTabCount.current >= 20) {
+      setAPIErrors((errors) => ({ ...errors, repeater: 'Repeater has reached its 20-tab limit. Close a tab before opening another request.' }));
+      return;
+    }
+    const id = nextRepeaterId.current++;
+    repeaterTabCount.current += 1;
+    setRepeaterTabs((current) => [...current, newRepeaterTab(id, request)]);
+    setActiveRepeaterId(id);
+    setAPIErrors((errors) => ({ ...errors, repeater: undefined }));
+  };
+
   const sendHistoryToRepeater = async (id: number) => {
+    const revision = ++repeaterHandoffRevision.current;
     try {
       const detail = exchange?.id === id ? exchange : await getExchange(id);
+      if (revision !== repeaterHandoffRevision.current) return;
       const query = detail.query ? `?${detail.query}` : '';
-      setRepeaterRequest({
+      openRepeaterDraft({
         method: detail.method,
         url: `${detail.scheme}://${detail.host}${detail.path}${query}`,
         headers: detail.request.headers,
         body: detail.request.textSafe ? detail.request.body : '',
       });
-      setRepeaterResult(null);
-      setAPIErrors((errors) => ({ ...errors, repeater: undefined }));
     } catch (error) {
       setAPIErrors((errors) => ({ ...errors, repeater: `Send to Repeater failed: ${error instanceof Error ? error.message : 'request failed'}` }));
     }
@@ -370,16 +389,31 @@ export function App() {
     }
   };
 
-  const sendRepeater = async (request: SendRequest) => {
+  const sendRepeater = async (tabId: number, request: SendRequest) => {
+    const sendId = nextRepeaterSendId.current++;
+    setRepeaterTabs((current) => current.map((tab) => tab.id === tabId ? { ...tab, pending: true, result: null, error: '', sendId } : tab));
     try {
-      const result = await sendRepeaterAPI('default', request);
-      setRepeaterResult(result);
+      const result = await sendRepeaterAPI(tabId === 1 ? 'default' : `tab-${tabId}`, request);
+      setRepeaterTabs((current) => current.map((tab) => tab.id === tabId && tab.sendId === sendId ? { ...tab, pending: false, result } : tab));
       if (!result.saved) void storage.refresh();
-      setAPIErrors((errors) => ({ ...errors, repeater: undefined }));
     } catch (error) {
-      setAPIErrors((errors) => ({ ...errors, repeater: `Repeater send failed: ${error instanceof Error ? error.message : 'request failed'}` }));
+      setRepeaterTabs((current) => current.map((tab) => tab.id === tabId && tab.sendId === sendId ? { ...tab, pending: false, error: `Repeater send failed: ${error instanceof Error ? error.message : 'request failed'}` } : tab));
     }
   };
+
+  const closeRepeaterTab = (id: number) => {
+    const index = repeaterTabs.findIndex((tab) => tab.id === id);
+    if (index < 0 || repeaterTabs.length === 1 || repeaterTabs[index].pending) return;
+    const next = repeaterTabs.filter((tab) => tab.id !== id);
+    repeaterTabCount.current = next.length;
+    setRepeaterTabs(next);
+    if (activeRepeaterId === id) setActiveRepeaterId(next[Math.min(index, next.length - 1)].id);
+  };
+
+  const repeaterWorkspace = <RepeaterWorkspace tabs={repeaterTabs} activeId={activeRepeaterId}
+    onSelect={setActiveRepeaterId} onNew={() => openRepeaterDraft(emptyRepeaterRequest)} onClose={closeRepeaterTab}
+    onDraftChange={(id: number, draft: RepeaterDraft) => setRepeaterTabs((current) => current.map((tab) => tab.id === id ? { ...tab, draft } : tab))}
+    onSend={(id, request) => void sendRepeater(id, request)} onSendToIntruder={sendRepeaterToIntruder} />;
 
   const addOriginToScope = async (item: HistoryItem) => {
     if (scopeMutationPending.current) return;
@@ -447,7 +481,7 @@ export function App() {
           <button className={`nav-item ${view === 'settings' ? 'active' : ''}`} onClick={() => setView('settings')} type="button"><SlidersHorizontal size={17} />Settings</button>
         </nav>
 
-        {view === 'api' ? <ApiWorkspace value={apiImport} onChange={setAPIImport} onSendToRepeater={(request) => { setRepeaterRequest(request); setRepeaterResult(null); setView('repeater'); }} /> : view === 'workbench' ? <Workbench /> : view === 'repeater' ? <section className="repeater-only" aria-label="Repeater workspace"><Repeater initialRequest={repeaterRequest} result={repeaterResult} onSend={(request) => void sendRepeater(request)} onSendToIntruder={sendRepeaterToIntruder} /></section> : view === 'intruder' ? <IntruderWorkspace leaveGuard={intruderLeaveGuard} source={intruderSource} onConsumeSource={() => setIntruderSource(null)} /> : view === 'scanner' ? <ActiveScannerWorkspace exchange={exchange} /> : view === 'findings' ? <FindingsWorkspace onOpenHistory={(id) => { setSelectedId(id); setView('traffic'); }} /> : view === 'websockets' ? <WebSocketsWorkspace leaveGuard={wsLeaveGuard} /> : view === 'target' ? <TargetWorkspace
+        {view === 'api' ? <ApiWorkspace value={apiImport} onChange={setAPIImport} onSendToRepeater={(request) => { openRepeaterDraft(request); setView('repeater'); }} /> : view === 'workbench' ? <Workbench /> : view === 'repeater' ? <section className="repeater-only" aria-label="Repeater workspace">{repeaterWorkspace}</section> : view === 'intruder' ? <IntruderWorkspace leaveGuard={intruderLeaveGuard} source={intruderSource} onConsumeSource={() => setIntruderSource(null)} /> : view === 'scanner' ? <ActiveScannerWorkspace exchange={exchange} /> : view === 'findings' ? <FindingsWorkspace onOpenHistory={(id) => { setSelectedId(id); setView('traffic'); }} /> : view === 'websockets' ? <WebSocketsWorkspace leaveGuard={wsLeaveGuard} /> : view === 'target' ? <TargetWorkspace
           refresh={targetRefresh}
           onOpenHistory={(id) => { setSelectedId(id); setView('traffic'); }}
           onSendToRepeater={(id) => { setView('traffic'); void sendHistoryToRepeater(id); }}
@@ -502,7 +536,7 @@ export function App() {
             disabled={!configReady || configSaving} onEnabledChange={(responseEnabled) => void saveIntercept({ responseEnabled })}
             onForward={actOnResponse} onDrop={actOnResponse} />
           <InterceptRules config={interceptConfig} disabled={!configReady || configSaving} onSave={(patch) => void saveIntercept(patch)} />
-          <Repeater initialRequest={repeaterRequest} result={repeaterResult} onSend={(request) => void sendRepeater(request)} onSendToIntruder={sendRepeaterToIntruder} />
+          {repeaterWorkspace}
         </section></>}
       </div>
     </main>

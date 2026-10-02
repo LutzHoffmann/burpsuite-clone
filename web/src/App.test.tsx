@@ -197,6 +197,47 @@ test('opens Repeater as a focused workspace', async () => {
   expect(screen.getByText('Request Editor')).toBeInTheDocument();
 });
 
+test('keeps independent Repeater drafts when switching tabs and workspaces', async () => {
+  await renderSettledApp();
+  await userEvent.click(screen.getByRole('button', { name: 'Repeater' }));
+  fireEvent.change(screen.getByRole('textbox', { name: 'URL' }), { target: { value: 'https://first.test/a' } });
+  fireEvent.change(screen.getByRole('textbox', { name: /Body Text-safe editing only/ }), { target: { value: 'first body' } });
+  await userEvent.click(screen.getByRole('button', { name: 'New tab' }));
+  fireEvent.change(screen.getByRole('textbox', { name: 'URL' }), { target: { value: 'https://second.test/b' } });
+  await userEvent.click(screen.getByRole('tab', { name: /1: / }));
+  expect(screen.getByRole('textbox', { name: 'URL' })).toHaveValue('https://first.test/a');
+  expect(screen.getByRole('textbox', { name: /Body Text-safe editing only/ })).toHaveValue('first body');
+  await userEvent.click(screen.getByRole('button', { name: 'Workbench' }));
+  await userEvent.click(screen.getByRole('button', { name: 'Repeater' }));
+  await userEvent.click(screen.getByRole('tab', { name: /2: / }));
+  expect(screen.getByRole('textbox', { name: 'URL' })).toHaveValue('https://second.test/b');
+  await userEvent.click(screen.getByRole('button', { name: 'Close Repeater tab 2' }));
+  expect(screen.getByRole('textbox', { name: 'URL' })).toHaveValue('https://first.test/a');
+  expect(screen.getByRole('button', { name: 'Close Repeater tab 1' })).toBeDisabled();
+});
+
+test('keeps a late Repeater response on its originating tab', async () => {
+  let finishSend!: (response: Response) => void;
+  const sendResponse = new Promise<Response>((resolve) => { finishSend = resolve; });
+  const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const { path, method } = requestDetails(input, init);
+    if (path === '/api/repeater/sessions/default/send' && method === 'POST') return sendResponse;
+    const base = strictBaseResponse(input, init, []);
+    if (base) return base;
+    throw new Error(`Unexpected request: ${method} ${path}`);
+  });
+  vi.stubGlobal('fetch', fetchMock);
+  render(<App />);
+  await screen.findByRole('button', { name: 'Send' });
+  fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+  expect(screen.getByRole('button', { name: 'Close Repeater tab 1' })).toBeDisabled();
+  fireEvent.click(screen.getByRole('button', { name: 'New tab' }));
+  await act(async () => finishSend(jsonResponse({ saved: true, status: 202, headers: {}, body: 'first tab only', durationMs: 9, size: 14, truncated: false, contentType: 'text/plain' })));
+  expect(screen.queryByDisplayValue('first tab only')).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole('tab', { name: /1: / }));
+  expect(await screen.findByDisplayValue('first tab only')).toBeInTheDocument();
+});
+
 test('keeps imported OpenAPI endpoints when handing a draft to Repeater', async () => {
   await renderSettledApp();
   await userEvent.click(screen.getByRole('button', { name: 'API Import' }));
@@ -271,7 +312,7 @@ test('sends a selected history request to repeater through the api', async () =>
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const { path, method } = requestDetails(input, init);
     if (path === '/api/history/7' && method === 'GET') return jsonResponse(exchangeFixture(7, 'replay.test', '/submit', 'captured'));
-    if (path === '/api/repeater/sessions/default/send' && method === 'POST') {
+    if (path === '/api/repeater/sessions/tab-2/send' && method === 'POST') {
       expect(init?.method).toBe('POST');
       expect(JSON.parse(String(init?.body))).toMatchObject({ method: 'POST', url: 'https://replay.test/submit', body: 'request text' });
       return jsonResponse({ saved: true, status: 202, headers: { 'Content-Type': ['text/plain'] }, body: 'real response', durationMs: 9, size: 13, truncated: false, contentType: 'text/plain' });
