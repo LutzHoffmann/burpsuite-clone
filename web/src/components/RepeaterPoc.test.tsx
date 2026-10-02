@@ -17,3 +17,14 @@ it('explains when a request cannot be represented by an HTML form', async () => 
   await userEvent.click(screen.getByRole('button', { name: 'Generate CSRF PoC' }));
   expect(screen.getByRole('alert')).toHaveTextContent(/GET or POST/);
 });
+
+it('searches a response and selects the next literal match', async () => {
+  render(<Repeater initialRequest={{ method: 'GET', url: 'https://example.test', headers: {}, body: '' }} result={{ saved: true, status: 200, headers: {}, body: 'Alpha beta ALPHA', durationMs: 2, size: 16, truncated: false, contentType: 'text/plain' }} onSend={() => {}} />);
+  await userEvent.type(screen.getByRole('textbox', { name: 'Find in response' }), 'alpha');
+  expect(screen.getByText('1 of 2')).toBeInTheDocument();
+  await userEvent.click(screen.getByRole('button', { name: 'Next match' }));
+  expect(screen.getByText('2 of 2')).toBeInTheDocument();
+  const body = screen.getByRole('textbox', { name: 'Body' }) as HTMLTextAreaElement;
+  expect(body.selectionStart).toBe(11);
+  expect(body.selectionEnd).toBe(16);
+});

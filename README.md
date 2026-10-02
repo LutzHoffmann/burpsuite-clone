@@ -24,6 +24,8 @@ form-urlencoded POST drafts. The form never auto-submits; custom headers and
 cookies cannot be represented. Repeater supports up to 20 independent tabs;
 drafts and responses survive workspace switches but not page reloads. See [CSRF PoC limits](docs/setup/csrf-poc.md)
 and the [feature status](docs/feature-status.md) for remaining Burp-like gaps.
+Tabs can be duplicated without sending traffic, and text responses can be
+searched locally for case-insensitive literal matches.
 
 API Import accepts local OpenAPI 3.0/3.1 JSON, lists supported endpoint methods,
 and opens editable Repeater drafts with parameters, JSON examples, or simple

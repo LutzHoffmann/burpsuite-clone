@@ -27,6 +27,22 @@ export function newRepeaterTab(id: number, request: SendRequest): RepeaterTab {
   return { id, draft: draftFromRequest(request), result: null, pending: false, error: '', sendId: 0 };
 }
 
+export function duplicateRepeaterTab(id: number, source: RepeaterTab): RepeaterTab {
+  return { id, draft: { ...source.draft }, result: null, pending: false, error: '', sendId: 0 };
+}
+
+export function findResponseMatches(body: string, query: string): number[] {
+  if (!query) return [];
+  const matches: number[] = [];
+  const escaped = query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const pattern = new RegExp(escaped, 'gi');
+  for (const match of body.matchAll(pattern)) {
+    matches.push(match.index);
+    if (matches.length >= 1000) break;
+  }
+  return matches;
+}
+
 export function tabLabel(tab: RepeaterTab): string {
   let host = 'New request';
   try { host = new URL(tab.draft.url).host || host; } catch { /* Incomplete URLs remain editable. */ }

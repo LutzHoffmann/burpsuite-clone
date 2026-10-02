@@ -1,7 +1,7 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import type { SendRequest, SendResult } from '../types';
 import { generateCsrfPoc } from '../tools/csrfPoc';
-import { draftFromRequest, formatRepeaterHeaders, parseRepeaterHeaders } from '../tools/repeaterTabs';
+import { draftFromRequest, findResponseMatches, formatRepeaterHeaders, parseRepeaterHeaders } from '../tools/repeaterTabs';
 import type { RepeaterDraft } from '../tools/repeaterTabs';
 
 type RepeaterProps = {
@@ -22,6 +22,10 @@ export function Repeater({ initialRequest, initialDraft, result, onSend, onSendT
   const [body, setBody] = useState(initial.body);
   const [poc, setPoc] = useState('');
   const [pocError, setPocError] = useState('');
+  const [responseSearch, setResponseSearch] = useState('');
+  const [searchPosition, setSearchPosition] = useState(0);
+  const responseBody = useRef<HTMLTextAreaElement>(null);
+  const matches = findResponseMatches(result?.body ?? '', responseSearch);
 
   const clearPoc = () => { setPoc(''); setPocError(''); };
 
@@ -39,6 +43,13 @@ export function Repeater({ initialRequest, initialDraft, result, onSend, onSendT
     anchor.download = 'csrf-poc.html';
     anchor.click();
     setTimeout(() => URL.revokeObjectURL(objectUrl), 0);
+  };
+  const selectMatch = (position: number) => {
+    if (!matches.length) return;
+    const index = (position + matches.length) % matches.length;
+    setSearchPosition(index);
+    responseBody.current?.focus();
+    responseBody.current?.setSelectionRange(matches[index], matches[index] + responseSearch.length);
   };
 
   return (
@@ -58,8 +69,9 @@ export function Repeater({ initialRequest, initialDraft, result, onSend, onSendT
           Response received, but this exchange was not saved to history. {result.storageWarning || 'Capture storage is paused.'}
         </div>}
         <dl className="response-meta"><div><dt>Duration</dt><dd>{result.durationMs} ms</dd></div><div><dt>Size</dt><dd>{result.size} B</dd></div></dl>
+        <div className="repeater-response-search"><label>Find in response<input aria-label="Find in response" value={responseSearch} onChange={(event) => { setResponseSearch(event.target.value); setSearchPosition(0); }} /></label><span aria-live="polite">{responseSearch ? `${matches.length === 0 ? 0 : searchPosition + 1} of ${matches.length}${matches.length === 1000 ? '+' : ''}` : 'Literal, case-insensitive'}</span><button type="button" className="quiet-button" disabled={!matches.length} onClick={() => selectMatch(searchPosition - 1)}>Previous match</button><button type="button" className="quiet-button" disabled={!matches.length} onClick={() => selectMatch(searchPosition + 1)}>Next match</button></div>
         <label className="repeater-field">Headers<textarea readOnly value={formatRepeaterHeaders(result.headers)} /></label>
-        <label className="repeater-field">Body<textarea readOnly value={result.body} /></label>
+        <label className="repeater-field">Body<textarea ref={responseBody} readOnly value={result.body} /></label>
       </> : <p className="empty-state">Send the request to inspect the local response.</p>}
     </section>
   );

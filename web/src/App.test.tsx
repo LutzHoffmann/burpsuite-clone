@@ -238,6 +238,19 @@ test('keeps a late Repeater response on its originating tab', async () => {
   expect(await screen.findByDisplayValue('first tab only')).toBeInTheDocument();
 });
 
+test('duplicates the current Repeater draft without sending it', async () => {
+  const fetchMock = initialAppFetchFixture();
+  vi.stubGlobal('fetch', fetchMock);
+  render(<App />);
+  await screen.findByRole('button', { name: 'Duplicate tab' });
+  fireEvent.change(screen.getByRole('textbox', { name: 'URL' }), { target: { value: 'https://copy.test/path' } });
+  fireEvent.change(screen.getByRole('textbox', { name: 'Headers' }), { target: { value: 'X-Draft: one\nnot yet valid' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Duplicate tab' }));
+  expect(screen.getByRole('textbox', { name: 'URL' })).toHaveValue('https://copy.test/path');
+  expect(screen.getByRole('textbox', { name: 'Headers' })).toHaveValue('X-Draft: one\nnot yet valid');
+  expect(countFetches(fetchMock, '/api/repeater/sessions/tab-2/send', 'POST')).toBe(0);
+});
+
 test('keeps imported OpenAPI endpoints when handing a draft to Repeater', async () => {
   await renderSettledApp();
   await userEvent.click(screen.getByRole('button', { name: 'API Import' }));

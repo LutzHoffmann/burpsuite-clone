@@ -36,7 +36,7 @@ import { WebSocketsWorkspace } from './components/WebSocketsWorkspace';
 import { Workbench } from './components/Workbench';
 import { ApiWorkspace } from './components/ApiWorkspace';
 import type { ApiWorkspaceState } from './components/ApiWorkspace';
-import { newRepeaterTab } from './tools/repeaterTabs';
+import { duplicateRepeaterTab, newRepeaterTab } from './tools/repeaterTabs';
 import type { RepeaterDraft } from './tools/repeaterTabs';
 import type { Exchange, HistoryItem, InterceptConfig, InterceptItem, ScopeRule, SendRequest, StatusDTO, TargetRefresh } from './types';
 
@@ -346,6 +346,15 @@ export function App() {
     setAPIErrors((errors) => ({ ...errors, repeater: undefined }));
   };
 
+  const duplicateRepeaterDraft = (sourceId: number) => {
+    const source = repeaterTabs.find((tab) => tab.id === sourceId);
+    if (!source || repeaterTabCount.current >= 20) return;
+    const id = nextRepeaterId.current++;
+    repeaterTabCount.current += 1;
+    setRepeaterTabs((current) => [...current, duplicateRepeaterTab(id, source)]);
+    setActiveRepeaterId(id);
+  };
+
   const sendHistoryToRepeater = async (id: number) => {
     const revision = ++repeaterHandoffRevision.current;
     try {
@@ -411,7 +420,7 @@ export function App() {
   };
 
   const repeaterWorkspace = <RepeaterWorkspace tabs={repeaterTabs} activeId={activeRepeaterId}
-    onSelect={setActiveRepeaterId} onNew={() => openRepeaterDraft(emptyRepeaterRequest)} onClose={closeRepeaterTab}
+    onSelect={setActiveRepeaterId} onNew={() => openRepeaterDraft(emptyRepeaterRequest)} onDuplicate={duplicateRepeaterDraft} onClose={closeRepeaterTab}
     onDraftChange={(id: number, draft: RepeaterDraft) => setRepeaterTabs((current) => current.map((tab) => tab.id === id ? { ...tab, draft } : tab))}
     onSend={(id, request) => void sendRepeater(id, request)} onSendToIntruder={sendRepeaterToIntruder} />;
 

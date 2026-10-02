@@ -8,13 +8,14 @@ type Props = {
   activeId: number;
   onSelect: (id: number) => void;
   onNew: () => void;
+  onDuplicate: (id: number) => void;
   onClose: (id: number) => void;
   onDraftChange: (id: number, draft: RepeaterDraft) => void;
   onSend: (id: number, request: SendRequest) => void;
   onSendToIntruder: (request: SendRequest) => void;
 };
 
-export function RepeaterWorkspace({ tabs, activeId, onSelect, onNew, onClose, onDraftChange, onSend, onSendToIntruder }: Props) {
+export function RepeaterWorkspace({ tabs, activeId, onSelect, onNew, onDuplicate, onClose, onDraftChange, onSend, onSendToIntruder }: Props) {
   const active = tabs.find((tab) => tab.id === activeId) ?? tabs[0];
   return <div className="repeater-workspace">
     <div className="repeater-tabbar">
@@ -24,7 +25,7 @@ export function RepeaterWorkspace({ tabs, activeId, onSelect, onNew, onClose, on
           <button type="button" aria-label={`Close Repeater tab ${tab.id}`} disabled={tabs.length === 1 || tab.pending} onClick={() => onClose(tab.id)}>&times;</button>
         </div>)}
       </div>
-      <button type="button" className="quiet-button" disabled={tabs.length >= 20} onClick={onNew}>New tab</button>
+      <div className="repeater-tab-actions"><button type="button" className="quiet-button" disabled={tabs.length >= 20} onClick={() => onDuplicate(active.id)}>Duplicate tab</button><button type="button" className="quiet-button" disabled={tabs.length >= 20} onClick={onNew}>New tab</button></div>
     </div>
     {active.error && <p className="api-error" role="alert">{active.error}</p>}
     <Repeater key={active.id} initialRequest={requestFromDraft(active.draft)} initialDraft={active.draft} result={active.result} pending={active.pending} onDraftChange={(draft) => onDraftChange(active.id, draft)} onSend={(request) => onSend(active.id, request)} onSendToIntruder={onSendToIntruder} />

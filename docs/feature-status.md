@@ -10,7 +10,7 @@ parity.
 | HTTP/HTTPS proxy, interception, replacements | Implemented for local manual work | No integrated dedicated browser; protocol coverage is not Burp parity |
 | WebSockets | Forwarding, history, and manual replay | Not a full message-interception or extension platform |
 | Target scope, Site Map, History | Implemented with local SQLite storage | No team workspace or cloud sync |
-| Repeater and CSRF PoC | Up to 20 independent in-memory request tabs with separate drafts, send state and responses; manual replay and GET/form-POST PoC generation | Tabs are not persisted across reloads; no request sequences or macros; PoC does not prove exploitability |
+| Repeater and CSRF PoC | Up to 20 independent in-memory tabs, draft duplication, literal response-body search, manual replay and GET/form-POST PoC generation | Tabs are not persisted across reloads; no request sequences or macros; response search is text-only; PoC does not prove exploitability |
 | Intruder | Bounded, persistent fuzzing with four attack modes | Not Turbo Intruder-scale throughput |
 | Crawler | Bounded same-origin GET crawl | No JavaScript rendering, automatic login, or form submission |
 | Passive findings | HSTS, CSP, nosniff, and selected HTTPS cookie-attribute observations | Not a comprehensive passive scanner; missing attributes are not confirmed vulnerabilities |
